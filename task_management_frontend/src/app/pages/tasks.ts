@@ -204,13 +204,15 @@ import {
         (onPageChange)="paginate($event)"
       />
     </section>
-    <p-dialog
-      [(visible)]="visible"
-      [modal]="true"
-      [header]="dialogTitle"
-      [style]="{ width: 'min(94vw, 560px)' }"
-      [closable]="!saving"
-    >
+   <p-dialog
+  [(visible)]="visible"
+  [modal]="true"
+  [header]="dialogTitle"
+  [style]="{ width: '540px', maxWidth: '95vw' }"
+  [draggable]="false"
+  [resizable]="false"
+  [closable]="!saving"
+  styleClass="task-dialog">
       @if (dialogError) {
         <div class="error">{{ dialogError }}</div>
       }
@@ -304,25 +306,78 @@ import {
           />
         </div>
       }
-      @if (mode === "assign") {
-        <label
-          >Assign to<p-select
-            [(ngModel)]="assignee"
-            [options]="people"
-            optionLabel="name"
-            optionValue="_id"
-            placeholder="Select an active user"
-            [filter]="true"
-        /></label>
-        <div class="actions">
-          <p-button
-            label="Assign task"
-            [loading]="saving"
-            [disabled]="!assignee"
-            (onClick)="save()"
-          />
+     
+@if(mode === 'assign') {
+  <div class="assign-task-form">
+
+    <div class="assign-task-info">
+      <i class="pi pi-user-plus"></i>
+      <div>
+        <strong>{{ selected?.title }}</strong>
+        <p>Select a team member to assign this task.</p>
+      </div>
+    </div>
+
+    <label class="assign-label">
+      Assign to
+    </label>
+
+    <p-select
+      [(ngModel)]="assignee"
+      [options]="people"
+      optionLabel="name"
+      optionValue="_id"
+      placeholder="Select a team member"
+      [filter]="true"
+      filterBy="name,email"
+      filterPlaceholder="Search by name or email"
+      appendTo="body"
+      scrollHeight="250px"
+      [showClear]="true"
+      [style]="{ width: '100%' }"
+      emptyMessage="No active users available"
+      emptyFilterMessage="No matching users found">
+
+      <ng-template #item let-person>
+        <div class="assignee-option">
+
+          <div class="assignee-avatar">
+            {{ person.name.charAt(0).toUpperCase() }}
+          </div>
+
+          <div class="assignee-details">
+            <strong>{{ person.name }}</strong>
+            <small>{{ person.email }}</small>
+          </div>
+
         </div>
-      }
+      </ng-template>
+
+    </p-select>
+
+    <div class="assign-actions">
+
+      <p-button
+        label="Cancel"
+        severity="secondary"
+        [outlined]="true"
+        [disabled]="saving"
+        (onClick)="visible = false"
+      />
+
+      <p-button
+        label="Assign task"
+        icon="pi pi-user-plus"
+        [loading]="saving"
+        [disabled]="!assignee || saving"
+        (onClick)="save()"
+      />
+
+    </div>
+
+  </div>
+}
+
       @if (mode === "delete") {
         <p>
           Delete <strong>{{ selected?.title }}</strong
