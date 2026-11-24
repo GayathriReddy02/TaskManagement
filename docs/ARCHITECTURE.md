@@ -304,7 +304,7 @@ The UI submits status, priority, search, tags, due-date bounds, sort, order, pag
 
 ```mermaid
 flowchart TD
-    A[Reports page submits filters + format] --> B[POST /api/reports/{json,csv,summary}]
+    A[Reports page submits filters + format] --> B[Submit report as JSON, CSV, or summary]
     B --> C[Validate filter keys and values]
     C --> D[Create in-memory report job]
     D --> E[Return HTTP 202 and job metadata]
