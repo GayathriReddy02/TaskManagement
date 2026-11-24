@@ -73,7 +73,7 @@ sequenceDiagram
     Router->>Auth: Match protected route
     Auth->>DB: Verify token subject against active user
     Auth-->>Ctrl: Set req.user
-    Ctrl->>Svc: Validate input and permissions; call service
+    Ctrl->>Svc: Validate input and permissions, then call service
     Svc->>DB: Query or persist data
     DB-->>Svc: Result
     Svc-->>Ctrl: Domain result
@@ -282,7 +282,7 @@ sequenceDiagram
     Q-->>W: ready event
     W->>S: Process activity and/or notification job
     S->>DB: Idempotent insert/upsert
-    Note over E,W: Async side effects may complete after HTTP response; in-memory events are not durable.
+    Note over E,W: Async side effects may complete after HTTP response and in-memory events are not durable.
 ```
 
 ## End-to-end workflows
