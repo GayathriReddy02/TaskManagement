@@ -59,25 +59,17 @@ flowchart LR
 ### Request path
 
 ```mermaid
-sequenceDiagram
-    participant UI as Angular page
-    participant API as Api service / interceptor
-    participant Router as Express route
-    participant Auth as protect middleware
-    participant Ctrl as Controller
-    participant Svc as Service / Mongoose
-    participant DB as MongoDB
-    UI->>API: Invoke typed API method
-    API->>API: Add Bearer token for protected /api request
-    API->>Router: HTTP request via /api proxy
-    Router->>Auth: Match protected route
-    Auth->>DB: Verify token subject against active user
-    Auth-->>Ctrl: Set req.user
-    Ctrl->>Svc: Validate input and permissions, then call service
-    Svc->>DB: Query or persist data
-    DB-->>Svc: Result
-    Svc-->>Ctrl: Domain result
-    Ctrl-->>UI: JSON response or centralized error
+flowchart TD
+    UI[Angular page] --> API[API client and interceptor]
+    API -->|Attach Bearer token| Router[Express route]
+    Router --> Auth[Authentication middleware]
+    Auth -->|Verify token and load active user| DB[(MongoDB)]
+    Auth -->|Set authenticated user| Ctrl[Controller]
+    Ctrl -->|Validate input and authorize| Svc[Service]
+    Svc -->|Read or write data| DB
+    DB -->|Return result| Svc
+    Svc --> Ctrl
+    Ctrl -->|JSON response or error| UI
 ```
 
 ## Folder structure
