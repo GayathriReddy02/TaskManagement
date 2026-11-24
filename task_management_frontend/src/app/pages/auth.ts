@@ -1,0 +1,143 @@
+import { Component, inject } from "@angular/core";
+import { FormsModule } from "@angular/forms";
+import { ActivatedRoute, RouterLink } from "@angular/router";
+import { ButtonModule } from "primeng/button";
+import { InputTextModule } from "primeng/inputtext";
+import { PasswordModule } from "primeng/password";
+import { Api, Auth, errorText } from "../core/api";
+@Component({
+  standalone: true,
+  imports: [
+    FormsModule,
+    RouterLink,
+    ButtonModule,
+    InputTextModule,
+    PasswordModule,
+  ],
+  template: `<main class="auth-layout">
+    <section class="auth-main">
+      <div class="brand">
+        <i class="pi pi-check-square"></i> Taskora<span>.</span>
+      </div>
+      <div class="auth-form">
+        <div class="eyebrow">
+          WORKSPACE / {{ register ? "GET STARTED" : "SIGN IN" }}
+        </div>
+        <h1>{{ register ? "Create your account" : "Welcome back." }}</h1>
+        <p class="muted">
+          {{
+            register
+              ? "Make meaningful progress with your team."
+              : "Sign in to organize your work and stay on track."
+          }}
+        </p>
+        <form (ngSubmit)="submit()" #form="ngForm">
+          @if (register) {
+            <label
+              >Full name<input
+                pInputText
+                name="name"
+                [(ngModel)]="name"
+                required
+                maxlength="80"
+                autocomplete="name"
+            /></label>
+          }
+          <label
+            >Email address<input
+              pInputText
+              name="email"
+              type="email"
+              [(ngModel)]="email"
+              required
+              email
+              autocomplete="email" /></label
+          ><label
+            >Password<p-password
+              name="password"
+              [(ngModel)]="password"
+              [toggleMask]="true"
+              [feedback]="false"
+              [required]="true"
+              [inputStyle]="{ width: '100%' }"
+              [style]="{ width: '100%' }"
+          /></label>
+          @if (register) {
+            <small>Use 8–72 characters. New accounts are regular users.</small>
+          }
+          @if (error) {
+            <div class="error" role="alert">{{ error }}</div>
+          }
+          <p-button
+            type="submit"
+            [label]="register ? 'Create account' : 'Sign in'"
+            icon="pi pi-arrow-right"
+            iconPos="right"
+            [loading]="busy"
+            [disabled]="form.invalid || busy"
+            styleClass="wide"
+          />
+        </form>
+        <p class="muted">
+          {{ register ? "Already registered?" : "New to Taskora?" }}
+          <a [routerLink]="register ? '/login' : '/register'">{{
+            register ? "Sign in" : "Create an account"
+          }}</a>
+        </p>
+      </div>
+      <footer>Secure workspace access · Taskora</footer>
+    </section>
+    <aside class="auth-art">
+      <div class="eyebrow">WORK WITH CLARITY</div>
+      <h2>Organize.<br />Execute.<br /><em>Achieve.</em></h2>
+      <p>One workspace for focused teams and meaningful progress.</p>
+      <div class="glass">
+        <i class="pi pi-verified"></i>
+        <div>
+          <strong>Built for team workflows</strong>
+          <p>Tasks, activity, reminders and reporting in one place.</p>
+        </div>
+      </div>
+      <small>TASKORA / WORKSPACE EXPERIENCE</small>
+    </aside>
+  </main>`,
+})
+export class AuthPage {
+  private api = inject(Api);
+  private auth = inject(Auth);
+  register = !!inject(ActivatedRoute).snapshot.data["register"];
+  name = "";
+  email = "";
+  password = "";
+  busy = false;
+  error = "";
+  async submit() {
+    if (this.busy) return;
+    this.error = "";
+    if (
+      this.register &&
+      (!this.name.trim() ||
+        this.password.length < 8 ||
+        this.password.length > 72)
+    ) {
+      this.error = "Enter a valid name and password of 8–72 characters.";
+      return;
+    }
+    this.busy = true;
+    try {
+      await this.auth.accept(
+        await (this.register
+          ? this.api.register(
+              this.name.trim(),
+              this.email.trim(),
+              this.password,
+            )
+          : this.api.login(this.email.trim(), this.password)),
+      );
+    } catch (e) {
+      this.error = errorText(e);
+    } finally {
+      this.busy = false;
+    }
+  }
+}

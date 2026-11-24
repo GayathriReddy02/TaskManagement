@@ -1,0 +1,11 @@
+const {test,before,after}=require('node:test');
+const assert=require('node:assert/strict');
+const {once}=require('node:events');
+const app=require('../src/app');
+let server,base;
+before(async()=>{server=app.listen(0,'127.0.0.1');await once(server,'listening');base=`http://127.0.0.1:${server.address().port}`;});
+after(async()=>{if(server)await new Promise((resolve,reject)=>server.close(e=>e?reject(e):resolve()));});
+test('health endpoint returns success',async()=>{const r=await fetch(base+'/');assert.equal(r.status,200);assert.equal((await r.json()).message,'Task Management API working');});
+test('missing routes use centralized error response',async()=>{const r=await fetch(base+'/missing');assert.equal(r.status,404);assert.equal((await r.json()).code,'NOT_FOUND');});
+test('protected task, job and export APIs reject unauthenticated requests',async()=>{for(const [url,method] of [['/api/tasks','GET'],['/api/jobs','GET'],['/api/reports/json','POST']]){const r=await fetch(base+url,{method});assert.equal(r.status,401);assert.equal((await r.json()).code,'UNAUTHORIZED');}});
+test('malformed JSON returns 400',async()=>{const r=await fetch(base+'/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:'{'});assert.equal(r.status,400);assert.equal((await r.json()).code,'VALIDATION_ERROR');});
