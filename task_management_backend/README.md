@@ -4,7 +4,7 @@ Stack: Node.js, Express, MongoDB/Mongoose, JWT, bcryptjs. No frontend.
 
 ## Run
 1. `npm install`
-2. Copy `.env.example` to `.env`; replace JWT_SECRET with a random secret of at least 32 chars; start local MongoDB.
+2. Create a local `.env` file with `MONGO_URI` and a private `JWT_SECRET` of at least 32 characters (there is no checked-in `.env.example`); start local MongoDB.
 3. `npm run dev`
 4. Open http://localhost:5000/ .
 
