@@ -6,7 +6,11 @@ import {
   HttpErrorResponse,
 } from "@angular/common/http";
 import { Router, CanActivateFn } from "@angular/router";
-import { catchError, firstValueFrom, throwError } from "rxjs";
+import {
+  catchError,
+  firstValueFrom,
+  throwError,
+} from "rxjs";
 import {
   User,
   Person,
@@ -17,8 +21,19 @@ import {
   Activity,
   Notice,
   Job,
+  JobPage,
   Status,
 } from "./models";
+
+function storedToken(): string | null {
+  return localStorage.getItem("token") || sessionStorage.getItem("token");
+}
+
+function clearStoredToken() {
+  localStorage.removeItem("token");
+  sessionStorage.removeItem("token");
+}
+
 export function errorText(e: unknown): string {
   if (e instanceof HttpErrorResponse) {
     return (
@@ -54,17 +69,20 @@ export class Api {
     return firstValueFrom(this.http.delete(this.base + path));
   }
   login(email: string, password: string) {
-    return this.post<{ user: User; token: string }>("/auth/login", {
+    return this.post<{ token: string; user: User }>("/auth/login", {
       email,
       password,
     });
   }
   register(name: string, email: string, password: string) {
-    return this.post<{ user: User; token: string }>("/auth/register", {
+    return this.post<{ message: string }>("/auth/register", {
       name,
       email,
       password,
     });
+  }
+  logout() {
+    return this.post<void>("/auth/logout", {});
   }
   me() {
     return this.get<{ user: User }>("/auth/me");
@@ -81,17 +99,24 @@ export class Api {
   createTask(body: TaskInput) {
     return this.post<{ task: Task }>("/tasks", body);
   }
-  editTask(id: string, body: TaskInput) {
-    return this.put<{ task: Task }>("/tasks/" + id, body);
+  editTask(id: string, body: TaskInput, updatedAt: string) {
+    return firstValueFrom(
+      this.http.put<{ task: Task }>(this.base + "/tasks/" + id, body, {
+        headers: { "If-Match": `"${updatedAt}"` },
+      }),
+    );
   }
   status(id: string, status: Status) {
     return this.patch("/tasks/" + id + "/status", { status });
   }
-  assign(id: string, assignedTo: string) {
+  assign(id: string, assignedTo: string | null) {
     return this.patch("/tasks/" + id + "/assign", { assignedTo });
   }
   users() {
     return this.get<{ users: Person[] }>("/users");
+  }
+  assignees(id: string) {
+    return this.get<{ users: Person[] }>(`/tasks/${id}/assignees`);
   }
   activity() {
     return this.get<{ activities: Activity[] }>("/activities");
@@ -107,18 +132,47 @@ export class Api {
   readAll() {
     return this.patch("/notifications/read-all", {});
   }
-  jobs() {
-    return this.get<{ jobs: Job[] }>("/jobs");
+  jobs(page = 1, limit = 10) {
+    return this.http.get<JobPage>(this.base + "/jobs", { params: { page, limit } });
   }
   report(format: string, filters: Record<string, string> = {}) {
     return this.post<{ job: Job }>("/reports/" + format, filters);
   }
   async download(job: Job) {
-    const blob = await firstValueFrom(
-      this.http.get(this.base + "/reports/download/" + job.id, {
-        responseType: "blob",
-      }),
-    );
+    let blob: Blob;
+    try {
+      blob = await firstValueFrom(
+        this.http.get(this.base + "/reports/download/" + job.id, {
+          responseType: "blob",
+        }),
+      );
+    } catch (e) {
+      if (e instanceof HttpErrorResponse && e.error instanceof Blob) {
+        const text = await e.error.text();
+        let body: unknown;
+        try {
+          body = JSON.parse(text);
+        } catch (parseError) {
+          if (parseError instanceof SyntaxError) throw e;
+          throw parseError;
+        }
+        if (
+          body &&
+          typeof body === "object" &&
+          "message" in body &&
+          typeof body.message === "string"
+        ) {
+          throw new HttpErrorResponse({
+            error: body,
+            headers: e.headers,
+            status: e.status,
+            statusText: e.statusText,
+            url: e.url ?? undefined,
+          });
+        }
+      }
+      throw e;
+    }
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -136,46 +190,53 @@ export class Auth {
   home() {
     return this.user()?.role === "admin" ? "/admin/dashboard" : "/dashboard";
   }
-  accept(response: { user: User; token: string }) {
-    sessionStorage.setItem("taskora_token", response.token);
-    this.user.set(response.user);
+  accept(user: User) {
+    this.user.set(user);
     return this.router.navigateByUrl(this.home());
   }
   restore() {
-    if (this.user() || !sessionStorage.getItem("taskora_token"))
-      return Promise.resolve();
+    if (this.user()) return Promise.resolve();
+    if (!storedToken()) return Promise.resolve();
     return (this.restoring ??= this.api
       .me()
       .then((r) => {
         this.user.set(r.user);
       })
-      .catch(() => {
-        sessionStorage.removeItem("taskora_token");
-        this.user.set(null);
+      .catch((e) => {
+        if (e instanceof HttpErrorResponse && e.status === 401) {
+          this.user.set(null);
+        }
       })
       .finally(() => {
         this.restoring = undefined;
       }));
   }
   logout() {
-    sessionStorage.removeItem("taskora_token");
+    const request = this.api.logout();
     this.user.set(null);
+    clearStoredToken();
+    void request.catch(() => undefined);
+    void this.router.navigateByUrl("/login");
+  }
+  sessionExpired() {
+    this.user.set(null);
+    clearStoredToken();
     void this.router.navigateByUrl("/login");
   }
 }
+
 export const authInterceptor: HttpInterceptorFn = (req, next) => {
   const auth = inject(Auth);
-  const token = sessionStorage.getItem("taskora_token");
   const isApi = req.url.startsWith("/api/");
-  const isAuth = /\/auth\/(login|register)$/.test(req.url);
-  return next(
-    isApi && token && !isAuth
+  const token = isApi ? storedToken() : null;
+  const outgoing =
+    token && isApi
       ? req.clone({ setHeaders: { Authorization: `Bearer ${token}` } })
-      : req,
-  ).pipe(
+      : req;
+  return next(outgoing).pipe(
     catchError((e) => {
-      if (isApi && !isAuth && e.status === 401 && token) {
-        auth.logout();
+      if (isApi && e instanceof HttpErrorResponse && e.status === 401) {
+        auth.sessionExpired();
       }
       return throwError(() => e);
     }),
@@ -185,9 +246,7 @@ export const signedIn: CanActivateFn = async () => {
   const auth = inject(Auth),
     router = inject(Router);
   await auth.restore();
-  return auth.user() && sessionStorage.getItem("taskora_token")
-    ? true
-    : router.parseUrl("/login");
+  return auth.user() ? true : router.parseUrl("/login");
 };
 export const roleGuard: CanActivateFn = async (route) => {
   const auth = inject(Auth),
@@ -195,5 +254,5 @@ export const roleGuard: CanActivateFn = async (route) => {
   await auth.restore();
   return auth.user()?.role === route.data["role"]
     ? true
-    : router.parseUrl(auth.home());
+    : router.parseUrl(auth.user() ? auth.home() : "/login");
 };

@@ -2,7 +2,7 @@
 
 ## 1. Purpose
 
-This project is a CommonJS Node.js backend for task management. It provides authentication, role-based task access, activities, notifications, dashboard summaries, periodic reminders, in-process background jobs, and JSON/CSV/summary exports.
+This project is a CommonJS Node.js backend for task management. It provides bearer-token authentication, role-based task access, activities, notifications, dashboard summaries, periodic reminders, MongoDB-backed background jobs, and JSON/CSV/summary exports.
 
 The implementation is educational and not production-hardened. There is no frontend in this project.
 
@@ -25,11 +25,10 @@ Start behavior:
 1. Load environment variables with `dotenv`.
 2. Validate `JWT_SECRET`.
 3. Connect to MongoDB.
-4. Initialize the `Activity` and `Notification` indexes.
-5. Register event listeners.
-6. Start the in-process queue worker.
-7. Start the reminder scheduler.
-8. Listen on `PORT`, defaulting to `5000`.
+4. Initialize model indexes and the durable queue.
+5. Clean expired jobs and export files.
+6. Start the MongoDB-backed queue worker and reminder scheduler.
+7. Listen on `PORT`, defaulting to `5000`.
 
 Required or supported environment variables:
 
@@ -57,9 +56,9 @@ Commands:
 - `src/controllers/`: HTTP request and response behavior.
 - `src/services/`: domain and query logic.
 - `src/middleware/`: authentication and centralized error handling.
-- `src/events/`: task event emitter and listener registration.
+- `src/events/`: compact event payload construction.
 - `src/jobs/`: reminder scheduler.
-- `src/queues/`: in-memory job queue.
+- `src/queues/`: MongoDB-backed durable job queue.
 - `src/workers/`: worker and job handlers.
 - `src/utils/`: async wrapping, retry, and CSV utilities.
 - `src/examples/`: callback binding and Promise concurrency demonstrations.
@@ -72,7 +71,10 @@ Commands:
 - Request JSON limit: `20 KB`.
 - Malformed JSON produces HTTP 400 and code `VALIDATION_ERROR`.
 - Oversized JSON produces HTTP 413 and code `PAYLOAD_TOO_LARGE`.
-- CORS is enabled for all origins by default.
+- Helmet security headers are enabled.
+- Credentialed CORS allows only the configured `CLIENT_ORIGIN` (defaults to `http://localhost:4200`); comma-separated exact origins are supported.
+- Login and registration are limited to 10 requests per IP address per 15 minutes.
+- Protected routes accept the existing JWT bearer-token contract using `Authorization: Bearer <token>`; cookies and CSRF tokens are not required.
 
 ### Health endpoint
 
@@ -141,9 +143,7 @@ Rules:
 - Password is hashed with bcrypt cost 12.
 - Public registration always creates a `user`.
 - `role`, `isActive`, and timestamps cannot be supplied publicly.
-- Duplicate email returns HTTP 409.
-
-Response includes a public user object and JWT.
+- Valid requests return the same neutral HTTP 202 response for new and existing accounts. Registration does not create an authenticated session; the user must log in afterward.
 
 ### Login
 
@@ -163,19 +163,16 @@ Rules:
 - User must exist and be active.
 - Password must match the stored bcrypt hash.
 - Invalid credentials return HTTP 401.
-- JWT contains the subject `sub = user.id`, uses HS256, and expires according to `JWT_EXPIRES_IN`.
+- JWT contains the subject `sub = user.id`, uses HS256, and expires according to `JWT_EXPIRES_IN`. The login response returns `{ "token", "user" }`; clients send the token as a bearer token.
+- `POST /api/auth/logout` returns 204. The client clears its locally stored token; the stateless JWT remains valid until expiry if copied elsewhere.
 
 ### Authentication middleware
 
-Protected endpoints require:
-
-```text
-Authorization: Bearer <token>
-```
+Protected endpoints require `Authorization: Bearer <token>`.
 
 The middleware:
 
-- Requires a Bearer token.
+- Requires a bearer token.
 - Verifies JWT signature and HS256 algorithm.
 - Reloads the user from MongoDB.
 - Rejects missing, inactive, or deleted accounts.
@@ -205,9 +202,9 @@ Public registration cannot create an admin. Admin accounts must be provisioned t
 
 `GET /api/users`
 
-Protected endpoint that returns active users sorted by name.
+Admin-only endpoint that returns active users sorted by name. Task owners/admins use `GET /api/tasks/:id/assignees` for an authorized, task-scoped assignment lookup.
 
-Only `name` and Mongoose `_id`-derived fields are exposed. Email addresses and password hashes are not returned.
+The general directory exposes names and IDs to admins only. Task-scoped assignee lookup is owner/admin-only and also includes email addresses for choosing an assignee. Password hashes are never returned.
 
 ## 9. Task Model
 
@@ -221,12 +218,15 @@ Fields:
 - `tags`: Array of strings; default `[]`.
 - `createdBy`: Required User ObjectId reference.
 - `assignedTo`: Optional User ObjectId reference; default `null`.
+- `notificationVersion`: Internal counter used to coordinate notification writes with task deletion; not part of public task input.
 - `createdAt` and `updatedAt`: Mongoose timestamps.
 
 Indexes:
 
 - `{ createdBy: 1, createdAt: -1 }`
 - `{ assignedTo: 1, createdAt: -1 }`
+- `{ status: 1, dueDate: 1 }`
+- `{ tags: 1, createdAt: -1 }`
 
 ## 10. Task API
 
@@ -324,6 +324,7 @@ Returns a task only if the caller may view it. Otherwise it returns HTTP 404.
 
 - Rejects unknown or protected fields.
 - Requires owner or admin authorization.
+- Requires `If-Match` containing the task's current `updatedAt`; missing or stale values return HTTP 409.
 - Updates allowed task fields with normalized title and tags.
 - Publishes `taskUpdated` when fields changed.
 - Publishes `taskCompleted` when status changed to `Completed`.
@@ -350,8 +351,9 @@ Request:
 {"assignedTo":"userMongoId"}
 ```
 
+- Send `{"assignedTo":null}` to unassign the task.
 - Owner or admin only.
-- The assignee must be an active, existing user.
+- A non-null assignee must be an active, existing user.
 - Publishes `taskAssigned` only when the assignee changed.
 
 ### Delete task
@@ -359,6 +361,8 @@ Request:
 `DELETE /api/tasks/:id`
 
 - Owner or admin only.
+- Deletes notifications linked to the task for all recipients in the same transaction.
+- Retains activity history.
 - Returns `{ "message": "Task deleted" }`.
 
 ## 11. Activities
@@ -450,6 +454,7 @@ The response contains:
 - `inProgress`
 - `overdue`
 - `byPriority`
+- `byTag`: up to ten tags ordered by task count descending; each task counts once per tag
 - `recentActivity`
 - `unreadNotifications`
 
@@ -460,7 +465,7 @@ Overdue means:
 
 ## 14. Event and Queue Architecture
 
-Task controllers publish events only after successful MongoDB writes.
+Task controllers persist activity and notification jobs in MongoDB in the same transaction as each successful task write.
 
 Events:
 
@@ -469,11 +474,9 @@ Events:
 - `taskAssigned`
 - `taskCompleted`
 
-The event module schedules listener execution with `setImmediate`. Event payloads receive a random UUID `eventId`.
+Event payloads receive a random UUID `eventId`. Workers claim jobs atomically, maintain processing leases, and recover expired leases after a restart. Activity event IDs and notification dedupe keys make retries idempotent.
 
-Each listener queues an in-memory job rather than writing directly. Listener failures are logged. Activity and notification delivery are not guaranteed if the process crashes.
-
-Existing reminder checks call the notification service directly and are separate from task event listeners.
+Existing reminder checks call the notification service directly and are separate from task outbox jobs.
 
 ## 15. Reminder Scheduler
 
@@ -493,11 +496,7 @@ No historical reminders are backfilled for old tasks.
 
 ## 16. Background Job Queue
 
-The queue is an in-memory `JobQueue` with:
-
-- A Map of jobs.
-- A FIFO pending array.
-- A `ready` EventEmitter event.
+The `JobQueue` persists jobs in MongoDB. A singleton capacity record serializes reservation checks; workers atomically claim pending jobs and expired processing leases.
 
 Job fields:
 
@@ -527,7 +526,7 @@ Job statuses:
 - `completed`
 - `failed`
 
-Jobs and status metadata disappear on process restart. Export files may remain on disk.
+Jobs and status metadata survive process restarts. Terminal metadata expires automatically (completed: 24 hours; failed: 7 days by default) and can be reclaimed earlier under capacity pressure. The default total capacity is 10,000; active jobs and reserved slots are protected. Requests requiring new slots return 503 if capacity cannot be reclaimed.
 
 ## 17. Queue Worker
 
@@ -537,25 +536,28 @@ The worker:
 - Processes jobs in FIFO order.
 - Makes an initial attempt plus up to three retries.
 - Uses exponential delays of 1 second, 2 seconds, and 4 seconds.
-- Occupies a worker slot while retry delays are active.
+- Releases the worker slot while a job waits for its next retry time.
 - Stops retrying `ValidationError`, `CastError`, `ForbiddenError`, `NotFoundError`, and unknown jobs.
 - Records attempt number, error message, and timestamp in `errors`.
 - Records `nextRetryAt` while waiting.
 - Records `finishedAt` after completion or failure.
+- Renews a processing lease while a handler is running.
 
 Activity and notification jobs are idempotent through `eventId` or notification dedupe keys.
 
 ## 18. Job API
 
-`GET /api/jobs`
+`GET /api/jobs?page=1&limit=10`
 
-- Current user sees owned jobs.
-- Admins see all job metadata.
+- Current user sees owned report jobs.
+- Admins see all report job metadata. Internal activity and notification jobs are hidden.
+- Page and limit are validated positive integers; limit is capped at 100.
+- Response: `jobs`, `page`, `limit`, `total`, `activeCount` (across all pages).
 - Job payload is excluded from public job views.
 
 `GET /api/jobs/:id`
 
-- Returns the job for the owner or for an admin.
+- Returns a report job for the owner or for an admin. Internal jobs return 404.
 - Regular users receive generic attempt failure text.
 - Admin users receive detailed attempt and terminal error text.
 - Unknown or inaccessible jobs return HTTP 404.
@@ -601,6 +603,7 @@ Report execution:
 JSON exports are arrays. CSV exports include a header and use one row per task. Summary exports are JSON containing `generatedAt`, `total`, and counts by task status.
 
 CSV values are formula protected: values beginning with whitespace, `=`, `+`, `-`, `@`, tab, carriage return, or newline receive a leading apostrophe.
+CSV and JSON exports are limited to 50,000 rows and 25 MiB. Summary exports are limited to 25 MiB.
 
 ## 20. Download API
 
@@ -638,7 +641,8 @@ Common status codes:
 - `401 UnauthorizedError`: missing, invalid, or inactive authentication.
 - `403 ForbiddenError`: authenticated but not permitted.
 - `404 NotFoundError`: resource missing or intentionally hidden.
-- `409`: duplicate email or report not ready.
+- `409`: task edit version is missing or stale.
+- `409`: report not ready.
 - `413`: JSON payload too large.
 - `503`: database unavailable or queue failure.
 
@@ -667,7 +671,7 @@ API tests cover:
 - Authentication rejection for task, job, and report APIs.
 - Malformed JSON handling.
 
-Full MongoDB-backed authenticated CRUD and report integration remain external test cases.
+`tests/jobRetention.test.js` also contains a MongoDB-backed queue/outbox transaction test. It runs only when `MONGO_TEST_URI` points to a local `rs0` replica-set database named `task_management_it_<12 hex characters>`; it drops only that named test database when finished. Without that variable, the test is skipped.
 
 Testing rule: never point test database operations at production.
 
@@ -690,12 +694,9 @@ Demonstrates lost `this`, `bind`, arrow-wrapper, `call`, and `apply` behavior.
 
 The current implementation is intentionally a learning baseline:
 
-- The queue is in-memory and not durable.
-- Jobs and status metadata disappear on restart.
-- Export files are not automatically cleaned or retained with a policy.
+- MongoDB must be configured as a replica set or transaction-capable sharded cluster.
+- Export requests are limited to five per user per rolling hour, and generated files are deleted after 24 hours.
 - Download access is not revoked when task permissions change after report creation.
-- No Redis, BullMQ, durable outbox, or dedicated scheduler is used.
-- CORS remains permissive.
-- Input sanitization and rate limiting are not implemented.
+- CORS is restricted to `CLIENT_ORIGIN`; authentication rate limits and Helmet headers are enabled.
+- Rate-limit and export-quota counters are process-local and reset on restart.
 - No production monitoring or distributed tracing is configured.
-- Export and database resources need limits for production use.

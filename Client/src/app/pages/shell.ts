@@ -1,4 +1,4 @@
-import { Component, inject } from "@angular/core";
+import { Component, computed, inject } from "@angular/core";
 import { RouterOutlet, RouterLink, RouterLinkActive } from "@angular/router";
 import { ButtonModule } from "primeng/button";
 import { Auth } from "../core/api";
@@ -74,24 +74,22 @@ import { Auth } from "../core/api";
 export class Shell {
   auth = inject(Auth);
   open = false;
-  links() {
-    return [
-      { label: "Overview", path: this.auth.home(), icon: "pi pi-chart-pie" },
-      { label: "Tasks", path: "/tasks", icon: "pi pi-list-check" },
-      { label: "Notifications", path: "/notifications", icon: "pi pi-bell" },
-      { label: "Activity", path: "/activity", icon: "pi pi-history" },
-      { label: "Reports & jobs", path: "/reports", icon: "pi pi-file-export" },
-      ...(this.auth.user()?.role === "admin"
-        ? [
-            {
-              label: "Team directory",
-              path: "/admin/team",
-              icon: "pi pi-users",
-            },
-          ]
-        : []),
-    ];
-  }
+  links = computed(() => [
+    { label: "Overview", path: this.auth.home(), icon: "pi pi-chart-pie" },
+    { label: "Tasks", path: "/tasks", icon: "pi pi-list-check" },
+    { label: "Notifications", path: "/notifications", icon: "pi pi-bell" },
+    { label: "Activity", path: "/activity", icon: "pi pi-history" },
+    { label: "Reports & jobs", path: "/reports", icon: "pi pi-file-export" },
+    ...(this.auth.user()?.role === "admin"
+      ? [
+          {
+            label: "Team directory",
+            path: "/admin/team",
+            icon: "pi pi-users",
+          },
+        ]
+      : []),
+  ]);
   theme() {
     document.documentElement.classList.toggle("dark");
   }

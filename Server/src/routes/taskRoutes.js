@@ -4,6 +4,7 @@ const tasks = require("../controllers/taskController");
 router.use(protect);
 router.post("/", tasks.createTask);
 router.get("/", tasks.getTasks);
+router.get("/:id/assignees", tasks.getAssignees);
 router.get("/:id", tasks.getTask);
 router.put("/:id", tasks.updateTask);
 router.patch("/:id/status", tasks.updateStatus);

@@ -4,8 +4,9 @@ import { FormsModule } from "@angular/forms";
 import { ButtonModule } from "primeng/button";
 import { SelectModule } from "primeng/select";
 import { InputTextModule } from "primeng/inputtext";
-import { TableModule } from "primeng/table";
+import { TableModule, TableLazyLoadEvent } from "primeng/table";
 import { TagModule } from "primeng/tag";
+import { Subscription } from "rxjs";
 import { Api, Auth, errorText } from "../core/api";
 import { Job, statuses, priorities } from "../core/models";
 @Component({
@@ -82,19 +83,23 @@ import { Job, statuses, priorities } from "../core/models";
         <p-button
           label="Export CSV"
           icon="pi pi-file-excel"
+          [outlined]="selectedFormat !== 'csv'"
           (onClick)="generate('csv')"
+          [loading]="submittingFormat === 'csv'"
           [disabled]="submitting"
         /><p-button
           label="Export JSON"
           icon="pi pi-code"
-          [outlined]="true"
+          [outlined]="selectedFormat !== 'json'"
           (onClick)="generate('json')"
+          [loading]="submittingFormat === 'json'"
           [disabled]="submitting"
         /><p-button
           label="Task summary"
           icon="pi pi-chart-bar"
-          [outlined]="true"
+          [outlined]="selectedFormat !== 'summary'"
           (onClick)="generate('summary')"
+          [loading]="submittingFormat === 'summary'"
           [disabled]="submitting"
         />
       </div>
@@ -102,14 +107,20 @@ import { Job, statuses, priorities } from "../core/models";
     <section class="panel">
       <div class="section-head">
         <h2>Background jobs</h2>
-        <small class="muted">Refreshes every 5 seconds</small>
+        <small class="muted">{{ activeCount ? "Refreshing active reports every 5 seconds" : "No active reports" }}</small>
       </div>
       <p-table
         [value]="jobs"
         [scrollable]="true"
         [tableStyle]="{ 'min-width': '760px' }"
         [paginator]="true"
-        [rows]="10"
+        [rows]="limit"
+        [first]="(page - 1) * limit"
+        [totalRecords]="total"
+        [rowsPerPageOptions]="[10, 25, 50]"
+        [lazy]="true"
+        [lazyLoadOnInit]="false"
+        (onLazyLoad)="paginate($event)"
         [loading]="busy && !jobs.length"
         ><ng-template #header
           ><tr>
@@ -166,8 +177,8 @@ import { Job, statuses, priorities } from "../core/models";
         ></p-table
       >
       <p class="muted small">
-        Job history is in memory and resets when the backend restarts. Only the
-        report requester can download its file.
+        Job history is temporary and may expire or be removed under capacity pressure.
+        Only the report requester can download its file.
       </p>
     </section>`,
 })
@@ -189,31 +200,57 @@ export class ReportsPage implements OnInit, OnDestroy {
   info = "";
   busy = false;
   submitting = false;
-  private timer?: ReturnType<typeof setInterval>;
-  ngOnInit() {
-    void this.load();
-    this.timer = setInterval(() => {
-      if (!this.busy) void this.load();
-    }, 5000);
-  }
+  submittingFormat: "csv" | "json" | "summary" | null = null;
+  selectedFormat: "csv" | "json" | "summary" = "csv";
+  page = 1;
+  limit = 10;
+  total = 0;
+  activeCount = 0;
+  private timer?: ReturnType<typeof setTimeout>;
+  private request?: Subscription;
+  private destroyed = false;
+  ngOnInit() { this.load(); }
   ngOnDestroy() {
-    clearInterval(this.timer);
+    this.destroyed = true;
+    clearTimeout(this.timer);
+    this.request?.unsubscribe();
   }
-  async load() {
-    if (this.busy) return;
+  paginate(event: TableLazyLoadEvent) {
+    this.limit = event.rows ?? 10;
+    this.page = Math.floor((event.first ?? 0) / this.limit) + 1;
+    this.load();
+  }
+  private schedule() {
+    if (!this.destroyed && this.activeCount > 0)
+      this.timer = setTimeout(() => this.load(), 5000);
+  }
+  load() {
+    if (this.destroyed) return;
+    clearTimeout(this.timer);
+    this.request?.unsubscribe();
     this.busy = true;
-    try {
-      this.jobs = (await this.api.jobs()).jobs.sort((a, b) =>
-        b.createdAt.localeCompare(a.createdAt),
-      );
-    } catch (e) {
-      this.error = errorText(e);
-    } finally {
-      this.busy = false;
-    }
+    this.request = this.api.jobs(this.page, this.limit).subscribe({
+      next: (r) => {
+        this.busy = false;
+        this.total = r.total;
+        this.activeCount = r.activeCount;
+        this.error = "";
+        const last = Math.max(1, Math.ceil(r.total / this.limit));
+        if (this.page > last) { this.page = last; this.load(); return; }
+        this.jobs = r.jobs;
+        this.schedule();
+      },
+      error: (e) => {
+        this.busy = false;
+        this.error = errorText(e);
+        this.schedule();
+      },
+    });
   }
-  async generate(format: string) {
+  async generate(format: "csv" | "json" | "summary") {
+    this.selectedFormat = format;
     this.submitting = true;
+    this.submittingFormat = format;
     this.error = "";
     this.info = "";
     try {
@@ -221,12 +258,16 @@ export class ReportsPage implements OnInit, OnDestroy {
       for (const [key, value] of Object.entries(this.filters))
         if (value?.trim()) filters[key] = value.trim();
       const r = await this.api.report(format, filters);
+      if (this.destroyed) return;
       this.info = "Report queued. Job " + r.job.id;
-      await this.load();
+      this.activeCount = Math.max(1, this.activeCount);
+      this.page = 1;
+      this.load();
     } catch (e) {
       this.error = errorText(e);
     } finally {
       this.submitting = false;
+      this.submittingFormat = null;
     }
   }
   severity(s: string): "success" | "danger" | "info" | "warn" {

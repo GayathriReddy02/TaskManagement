@@ -20,6 +20,7 @@ async function dashboard(user) {
     pending,
     overdue,
     priorities,
+    tagCounts,
     recentActivity,
     unreadNotifications,
   ] = await Promise.all([
@@ -35,6 +36,18 @@ async function dashboard(user) {
       { $match: match },
       { $group: { _id: "$priority", count: { $sum: 1 } } },
     ]),
+    Task.aggregate([
+      { $match: match },
+      {
+        $project: {
+          tags: { $setUnion: [{ $ifNull: ["$tags", []] }, []] },
+        },
+      },
+      { $unwind: "$tags" },
+      { $group: { _id: "$tags", count: { $sum: 1 } } },
+      { $sort: { count: -1, _id: 1 } },
+      { $limit: 10 },
+    ]),
     Activity.find(activityFilter).sort({ createdAt: -1 }).limit(5).lean(),
     Notification.countDocuments({ userId: uid, isRead: false }),
   ]);
@@ -49,6 +62,7 @@ async function dashboard(user) {
       Medium: priorities.find((p) => p._id === "Medium")?.count || 0,
       High: priorities.find((p) => p._id === "High")?.count || 0,
     },
+    byTag: tagCounts.map(({ _id: tag, count }) => ({ tag, count })),
     recentActivity,
     unreadNotifications,
   };

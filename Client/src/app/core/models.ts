@@ -8,6 +8,7 @@ export interface User {
 export interface Person {
   _id: string;
   name: string;
+  email?: string;
 }
 export type Status = "Pending" | "In Progress" | "Completed";
 export type Priority = "Low" | "Medium" | "High";
@@ -22,7 +23,9 @@ export interface TaskInput {
 export interface Task extends TaskInput {
   _id: string;
   createdBy: string;
+  createdByName?: string | null;
   assignedTo: string | null;
+  assignedToName?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -57,6 +60,7 @@ export interface Dashboard {
   byPriority: Record<Priority, number>;
   recentActivity: Activity[];
   unreadNotifications: number;
+  byTag: { tag: string; count: number }[];
 }
 export interface Job {
   id: string;
@@ -70,6 +74,13 @@ export interface Job {
   createdAt: string;
   nextRetryAt?: string;
   result?: { filename: string; size: number; format: string };
+}
+export interface JobPage {
+  jobs: Job[];
+  page: number;
+  limit: number;
+  total: number;
+  activeCount: number;
 }
 export const statuses: Status[] = ["Pending", "In Progress", "Completed"];
 export const priorities: Priority[] = ["Low", "Medium", "High"];

@@ -5,7 +5,7 @@ The API is served by the Express backend. Prefix endpoints with `http://localhos
 ## Conventions
 
 - JSON request and response bodies unless noted.
-- Protected routes require `Authorization: Bearer <JWT>`.
+- Protected routes require `Authorization: Bearer <token>`. Login continues to issue JWT bearer tokens; state-changing requests do not require CSRF tokens.
 - Registration and login are public.
 - Public registration always assigns the `user` role.
 - Task visibility is owned or assigned for regular users; admins can view all tasks.
@@ -27,34 +27,38 @@ Some controller validation paths retain their original `{ "message": "..." }` re
 | Module | Method | Endpoint | Auth / allowed roles | Parameters or body | Success response | Common status codes |
 |---|---|---|---|---|---|---|
 | Health | GET | `/` | Public | — | `{ "message": "Task Management API working" }` | 200 |
-| Auth | POST | `/api/auth/register` | Public | `name`, `email`, `password` | `{ "user", "token" }` (201) | 201, 400, 409 |
-| Auth | POST | `/api/auth/login` | Public | `email`, `password` | `{ "user", "token" }` | 200, 400, 401 |
-| Auth | GET | `/api/auth/me` | Bearer JWT; active user | — | `{ "user" }` | 200, 401 |
-| Users | GET | `/api/users` | Bearer JWT; user/admin | — | `{ "users": [{ "_id", "name" }] }` | 200, 401 |
-| Tasks | POST | `/api/tasks` | Bearer JWT; user/admin | Task fields listed below | `{ "task" }` (201) | 201, 400, 401 |
-| Tasks | GET | `/api/tasks` | Bearer JWT; user/admin | Filter, sort and pagination query | `{ "tasks", "total", "page", "limit", "totalPages" }` | 200, 400, 401 |
-| Tasks | GET | `/api/tasks/:id` | Bearer JWT; visible task | `id` path parameter | `{ "task" }` | 200, 400, 401, 404 |
-| Tasks | PUT | `/api/tasks/:id` | Bearer JWT; owner/admin | Allowed task fields | `{ "task" }` | 200, 400, 401, 403, 404 |
-| Tasks | PATCH | `/api/tasks/:id/status` | Bearer JWT; owner/assignee/admin | `{ "status" }` | `{ "task" }` | 200, 400, 401, 403, 404 |
-| Tasks | PATCH | `/api/tasks/:id/assign` | Bearer JWT; owner/admin | `{ "assignedTo": "userId" }` | `{ "task" }` | 200, 400, 401, 403, 404 |
-| Tasks | DELETE | `/api/tasks/:id` | Bearer JWT; owner/admin | `id` path parameter | `{ "message": "Task deleted" }` | 200, 400, 401, 403, 404 |
-| Activity | GET | `/api/activities` | Bearer JWT; user/admin | — | `{ "activities": [...] }` (max 50) | 200, 401 |
-| Notifications | GET | `/api/notifications` | Bearer JWT; user/admin | — | `{ "notifications": [...], "unreadCount": number }` | 200, 401 |
-| Notifications | PATCH | `/api/notifications/:id/read` | Bearer JWT; notification owner | `id` path parameter | `{ "notification": {...} }` | 200, 400, 401, 404 |
-| Notifications | PATCH | `/api/notifications/read-all` | Bearer JWT; current user | — | `{ "updated": number }` | 200, 401 |
-| Dashboard | GET | `/api/dashboard` | Bearer JWT; user/admin | — | Counts, priority distribution, recent activity and unread count | 200, 401 |
-| Jobs | GET | `/api/jobs` | Bearer JWT; own jobs, admin all | — | `{ "jobs": [...] }` | 200, 401 |
-| Jobs | GET | `/api/jobs/:id` | Bearer JWT; owner/admin | `id` path parameter | `{ "job": {...} }` | 200, 401, 404 |
-| Reports | POST | `/api/reports/json` | Bearer JWT; user/admin, scoped tasks | Optional report filters | `{ "job": {...} }` (202) | 202, 400, 401 |
-| Reports | POST | `/api/reports/csv` | Bearer JWT; user/admin, scoped tasks | Optional report filters | `{ "job": {...} }` (202) | 202, 400, 401 |
-| Reports | POST | `/api/reports/summary` | Bearer JWT; user/admin, scoped tasks | Optional report filters | `{ "job": {...} }` (202) | 202, 400, 401 |
-| Reports | GET | `/api/reports/download/:id` | Bearer JWT; original requester only | Report job `id` | File download | 200, 401, 404, 409 |
+| Auth | POST | `/api/auth/register` | Public | `name`, `email`, `password` | Neutral `{ "message" }` (202) | 202, 400, 429 |
+| Auth | POST | `/api/auth/login` | Public | `email`, `password` | `{ "token", "user" }` | 200, 400, 401, 429 |
+| Auth | POST | `/api/auth/logout` | Public | — | Empty response | 204 |
+| Auth | GET | `/api/auth/me` | Bearer token; active user | — | `{ "user" }` | 200, 401 |
+| Users | GET | `/api/users` | Bearer token; admin only | — | `{ "users": [...] }` | 200, 401, 403 |
+| Tasks | POST | `/api/tasks` | Bearer token; user/admin | Task fields listed below | `{ "task" }` (201) | 201, 400, 401 |
+| Tasks | GET | `/api/tasks` | Bearer token; user/admin | Filter, sort and pagination query | `{ "tasks", "total", "page", "limit", "totalPages" }` | 200, 400, 401 |
+| Tasks | GET | `/api/tasks/:id` | Bearer token; visible task | `id` path parameter | `{ "task" }` | 200, 400, 401, 404 |
+| Tasks | GET | `/api/tasks/:id/assignees` | Bearer token; task owner/admin | `id` path parameter | `{ "users": [...] }` | 200, 401, 403, 404 |
+| Tasks | PUT | `/api/tasks/:id` | Bearer token; owner/admin | `If-Match: "<updatedAt>"`; allowed task fields | `{ "task" }` | 200, 400, 401, 403, 404, 409 |
+| Tasks | PATCH | `/api/tasks/:id/status` | Bearer token; owner/assignee/admin | `{ "status" }` | `{ "task" }` | 200, 400, 401, 403, 404 |
+| Tasks | PATCH | `/api/tasks/:id/assign` | Bearer token; owner/admin | `{ "assignedTo": "userId" }` or `{ "assignedTo": null }` | `{ "task" }` | 200, 400, 401, 403, 404 |
+| Tasks | DELETE | `/api/tasks/:id` | Bearer token; owner/admin | `id` path parameter | `{ "message": "Task deleted" }` | 200, 400, 401, 403, 404 |
+| Activity | GET | `/api/activities` | Bearer token; user/admin | — | `{ "activities": [...] }` (max 50) | 200, 401 |
+| Notifications | GET | `/api/notifications` | Bearer token; user/admin | — | `{ "notifications": [...], "unreadCount": number }` | 200, 401 |
+| Notifications | PATCH | `/api/notifications/:id/read` | Bearer token; notification owner | `id` path parameter | `{ "notification": {...} }` | 200, 400, 401, 404 |
+| Notifications | PATCH | `/api/notifications/read-all` | Bearer token; current user | — | `{ "updated": number }` | 200, 401 |
+| Dashboard | GET | `/api/dashboard` | Bearer token; user/admin | — | Counts, priority distribution, recent activity and unread count | 200, 401 |
+| Jobs | GET | `/api/jobs` | Bearer token; own reports, admin all reports | `page`, `limit` | `{ "jobs": [...], "page": 1, "limit": 10, "total": 0, "activeCount": 0 }` | 200, 400, 401 |
+| Jobs | GET | `/api/jobs/:id` | Bearer token; owner/admin | `id` path parameter | `{ "job": {...} }` | 200, 401, 404 |
+| Reports | POST | `/api/reports/json` | Bearer token; user/admin | Optional report filters | `{ "job": {...} }` (202) | 202, 400, 401, 429, 503 |
+| Reports | POST | `/api/reports/csv` | Bearer token; user/admin | Optional report filters | `{ "job": {...} }` (202) | 202, 400, 401 |
+| Reports | POST | `/api/reports/summary` | Bearer token; user/admin | Optional report filters | `{ "job": {...} }` (202) | 202, 400, 401 |
+| Reports | GET | `/api/reports/download/:id` | Bearer token; original requester only | Report job `id` | File download | 200, 401, 404, 409 |
 
 Authentication is implemented by `protect` middleware in `src/middleware/auth.js`. There is no standalone `requireRole` use in current route files; task/job/report access is checked in middleware or domain/controller logic.
 
 ## Authentication examples
 
-### Register
+### Register and login
+
+Registration always returns the same neutral response for valid details, whether or not an account already exists; it does not sign in the user. Sign in afterward.
 
 ```http
 POST /api/auth/register
@@ -69,17 +73,11 @@ Content-Type: application/json
 }
 ```
 
-Example response (201; token is illustrative, not a real credential):
+Response (202), regardless of whether an account was created:
 
 ```json
 {
-  "user": {
-    "id": "665000000000000000000001",
-    "name": "Alex Morgan",
-    "email": "alex@example.com",
-    "role": "user"
-  },
-  "token": "<JWT>"
+  "message": "If the account can be created, you may now sign in."
 }
 ```
 
@@ -87,7 +85,7 @@ Passwords must contain 8–72 characters. Names are required and limited to 80 c
 
 ### Login and current user
 
-`POST /api/auth/login` accepts `email` and `password`, and returns the same `{ "user", "token" }` structure. Use the returned token on protected routes:
+`POST /api/auth/login` accepts `email` and `password`, and returns `{ "token", "user" }`. Send the token as `Authorization: Bearer <token>` on protected requests. The Angular client stores the token in local storage and sends it automatically. `/api/auth/logout` returns 204; the client removes the locally stored token.
 
 ```http
 Authorization: Bearer <JWT>
@@ -116,7 +114,6 @@ The API rejects unknown/protected request fields such as `createdBy`, `assignedT
 
 ```http
 POST /api/tasks
-Authorization: Bearer <JWT>
 Content-Type: application/json
 ```
 
@@ -159,7 +156,6 @@ Example:
 
 ```http
 GET /api/tasks?status=Pending&priority=High&tags=release,review&fromDate=2026-12-01&toDate=2026-12-31&sortBy=priority&order=desc&page=1&limit=10
-Authorization: Bearer <JWT>
 ```
 
 Supported query parameters:
@@ -192,10 +188,11 @@ Priority sort order is High, Medium, Low for descending. Regular users see tasks
 
 ### Update, status, assign, delete
 
-- `PUT /api/tasks/:id`: owner/admin only; accepts allowed task fields.
+- `PUT /api/tasks/:id`: owner/admin only; accepts allowed task fields and the task's current `updatedAt` in `If-Match`. Stale or missing versions return HTTP 409.
+- `GET /api/tasks/:id/assignees`: owner/admin only; returns active assignment candidates for that task. The general `/api/users` directory is admin-only.
 - `PATCH /api/tasks/:id/status`: accepts only `{ "status": "In Progress" }`; task must be visible to caller, so owner/assignee/admin may update.
-- `PATCH /api/tasks/:id/assign`: accepts only `{ "assignedTo": "<active-user-id>" }`; owner/admin only.
-- `DELETE /api/tasks/:id`: owner/admin only.
+- `PATCH /api/tasks/:id/assign`: accepts `{ "assignedTo": "<active-user-id>" }` to assign or `{ "assignedTo": null }` to unassign; owner/admin only.
+- `DELETE /api/tasks/:id`: owner/admin only; removes every notification linked to the task while preserving its historical activity.
 
 The backend publishes task events after successful writes. Activity and notification processing may happen after the HTTP response.
 
@@ -213,12 +210,13 @@ The backend publishes task events after successful writes. Activity and notifica
   "inProgress": 5,
   "overdue": 1,
   "byPriority": { "Low": 2, "Medium": 6, "High": 4 },
+  "byTag": [{ "tag": "release", "count": 5 }],
   "recentActivity": [],
   "unreadNotifications": 2
 }
 ```
 
-Counts are server-scoped to all tasks for admin or owned/assigned tasks for regular users. Overdue means incomplete with `dueDate` earlier than today's UTC midnight.
+Counts are server-scoped to all tasks for admin or owned/assigned tasks for regular users. `byTag` contains the ten most-used tags, with each task counted once per tag. Overdue means incomplete with `dueDate` earlier than today's UTC midnight.
 
 ### Activity
 
@@ -235,11 +233,13 @@ Counts are server-scoped to all tasks for admin or owned/assigned tasks for regu
 
 ### Job status
 
-`GET /api/jobs` lists jobs visible to caller. `GET /api/jobs/:id` returns one visible job. Owners see their jobs; admins see all metadata. Job payloads are omitted and non-admin error details are redacted.
+`GET /api/jobs?page=1&limit=10` lists report jobs visible to the caller, newest first. `page` defaults to 1 (maximum 1,000,000); `limit` defaults to 10 (maximum 100). Both must be positive integer query strings. The response contains `jobs`, `page`, `limit`, `total`, and `activeCount` (all visible non-terminal report jobs, across pages). `GET /api/jobs/:id` returns one visible report job. Owners see their own report jobs; admins see all report metadata. Internal activity/notification jobs are hidden from both endpoints. Job payloads are omitted and non-admin error details are redacted.
 
 Job response may include `id`, `type`, `ownerId`, `status`, `attempts`, `maxRetries`, `errors`, `createdAt`, `nextRetryAt`, `result`, and terminal error metadata.
 
-Statuses are `pending`, `processing`, `completed` and `failed`. The in-memory worker allows two concurrent jobs by default, makes up to three retries after the initial attempt, and uses 1s/2s/4s backoff. Job metadata is lost when the process restarts.
+Statuses are `pending`, `processing`, `completed` and `failed`. MongoDB persists jobs; workers atomically claim jobs, recover expired leases after restarts, allow two concurrent jobs by default, make up to three retries after the initial attempt, and use 1s/2s/4s backoff. Terminal metadata expires after configurable retention periods (24 hours completed, 7 days failed by default), can be evicted earlier under capacity pressure. Pending, processing and retrying jobs are never evicted. Capacity exhaustion returns HTTP 503. Each user may request at most five reports per rolling hour; generated report files expire after 24 hours and are cleaned hourly. CSV/JSON exports are limited to 50,000 rows and 25 MiB.
+
+Login and registration are limited to 10 requests per IP address per 15 minutes. Configure allowed browser origins through `CLIENT_ORIGIN` (comma-separated); its default is `http://localhost:4200`.
 
 ### Request a report
 
@@ -283,10 +283,11 @@ Centralized errors include `message`, `success: false`, `code` and `statusCode`.
 | Status | Example situations |
 |---:|---|
 | 400 | Invalid task fields, filters, IDs, pagination or JSON |
-| 401 | Missing/invalid/expired token or inactive account |
+| 401 | Missing/invalid/expired bearer token or inactive account |
 | 403 | Authenticated account lacks operation permission |
 | 404 | Resource missing or intentionally hidden from caller |
-| 409 | Duplicate email or report not ready |
+| 409 | Report not ready |
+| 409 | Task changed since it was loaded |
 | 413 | Request JSON exceeds the 20 KB parser limit |
 | 503 | Common MongoDB connectivity errors or queue-related error |
 | 500 | Unexpected internal error |

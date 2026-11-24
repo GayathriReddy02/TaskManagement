@@ -4,9 +4,10 @@ const User = require("../models/User");
 const asyncHandler = require("../utils/asyncHandler");
 
 const protect = asyncHandler(async (req, res, next) => {
-  const header = req.headers.authorization || "";
-  const [scheme, token] = header.split(" ");
-  if (scheme !== "Bearer" || !token) throw new UnauthorizedError("Login required");
+  const authorization = req.get("authorization") || "";
+  const match = /^Bearer\s+(\S+)$/i.exec(authorization);
+  const token = match?.[1];
+  if (!token) throw new UnauthorizedError("Login required");
 
   let payload;
   try {

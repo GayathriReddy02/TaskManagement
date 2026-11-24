@@ -37,15 +37,15 @@ flowchart LR
         Auth --> ApiClient
     end
     Proxy[Angular dev proxy /api] --> Express
-    ApiClient -->|HTTP + Bearer JWT| Proxy
+    ApiClient -->|HTTP + bearer JWT| Proxy
     subgraph Server["Node.js backend"]
         Express[Express app]
         Middleware[Auth and error middleware]
         RoutesBackend[Routes]
         Controllers[Controllers]
         Services[Services and query rules]
-        Events[EventEmitter]
-        Queue[In-memory queue + worker]
+        Events[Transactional outbox jobs]
+        Queue[MongoDB queue + worker]
         Scheduler[Reminder scheduler]
         Express --> Middleware --> RoutesBackend --> Controllers --> Services
         Controllers --> Events --> Queue
@@ -61,7 +61,7 @@ flowchart LR
 ```mermaid
 flowchart TD
     UI[Angular page] --> API[API client and interceptor]
-    API -->|Attach Bearer token| Router[Express route]
+    API -->|Send bearer JWT| Router[Express route]
     Router --> Auth[Authentication middleware]
     Auth -->|Verify token and load active user| DB[(MongoDB)]
     Auth -->|Set authenticated user| Ctrl[Controller]
@@ -82,7 +82,7 @@ TaskManagement/
 ├── docs/
 │   ├── API.md
 │   └── ARCHITECTURE.md
-├── task_management_backend/
+├── Server/
 │   ├── README.md
 │   ├── UPDATE_NOTES.md
 │   ├── SPECIFICATION.md
@@ -102,19 +102,20 @@ TaskManagement/
 │   │   │   ├── taskController.js
 │   │   │   └── userController.js
 │   │   ├── errors/AppError.js
-│   │   ├── events/
-│   │   │   ├── registerListeners.js
-│   │   │   └── taskEvents.js
+│   │   ├── events/eventPayload.js
 │   │   ├── examples/
 │   │   │   ├── classCallbacks.js
 │   │   │   └── promiseConcurrency.js
 │   │   ├── jobs/reminderScheduler.js
 │   │   ├── middleware/
 │   │   │   ├── auth.js
+│   │   │   ├── authRateLimit.js
 │   │   │   └── errorHandler.js
 │   │   ├── models/
 │   │   │   ├── Activity.js
+│   │   │   ├── Job.js
 │   │   │   ├── Notification.js
+│   │   │   ├── QueueState.js
 │   │   │   ├── Task.js
 │   │   │   └── User.js
 │   │   ├── queues/jobQueue.js
@@ -143,8 +144,10 @@ TaskManagement/
 │   │       └── queueWorker.js
 │   └── tests/
 │       ├── api.test.js
-│       └── core.test.js
-└── task_management_frontend/
+│       ├── core.test.js
+│       ├── jobRetention.test.js
+│       └── securityLimits.test.js
+└── Client/
     ├── README.md
     ├── angular.json
     ├── package.json
@@ -173,12 +176,12 @@ TaskManagement/
 ### Important root and configuration files
 
 - [`README.md`](../README.md): project overview and quick start.
-- [`task_management_backend/server.js`](../task_management_backend/server.js): validates startup configuration, connects to MongoDB, initializes indexes, starts listeners, worker, scheduler and HTTP server.
-- [`task_management_backend/src/app.js`](../task_management_backend/src/app.js): configures CORS, JSON parsing, API mount points, 404 handling and error middleware.
-- [`task_management_backend/package.json`](../task_management_backend/package.json): backend scripts and direct dependencies.
-- [`task_management_frontend/angular.json`](../task_management_frontend/angular.json): Angular CLI build and serve targets.
-- [`task_management_frontend/proxy.conf.json`](../task_management_frontend/proxy.conf.json): local `/api` proxy target.
-- [`task_management_frontend/src/main.ts`](../task_management_frontend/src/main.ts): standalone Angular bootstrap, router, HTTP interceptor, animations and PrimeNG Aura preset.
+- [`Server/server.js`](../Server/server.js): validates startup configuration, connects to MongoDB, initializes indexes, starts listeners, worker, scheduler and HTTP server.
+- [`Server/src/app.js`](../Server/src/app.js): configures CORS, JSON parsing, API mount points, 404 handling and error middleware.
+- [`Server/package.json`](../Server/package.json): backend scripts and direct dependencies.
+- [`Client/angular.json`](../Client/angular.json): Angular CLI build and serve targets.
+- [`Client/proxy.conf.json`](../Client/proxy.conf.json): local `/api` proxy target.
+- [`Client/src/main.ts`](../Client/src/main.ts): standalone Angular bootstrap, router, HTTP interceptor, animations and PrimeNG Aura preset.
 
 ## Frontend architecture
 
@@ -186,7 +189,7 @@ The client uses standalone Angular components and lazy-loaded route components. 
 
 ### Routes and layout
 
-[`routes.ts`](../task_management_frontend/src/app/routes.ts) defines:
+[`routes.ts`](../Client/src/app/routes.ts) defines:
 
 - Public `/login` and `/register`.
 - Protected shell routes for dashboards, tasks, notifications, activity and reports.
@@ -194,27 +197,27 @@ The client uses standalone Angular components and lazy-loaded route components. 
 - Lazy-loaded page components via `loadComponent`.
 - A default redirect to the role-specific dashboard and a wildcard redirect to login.
 
-[`shell.ts`](../task_management_frontend/src/app/pages/shell.ts) provides the sidebar, top bar, role indicator, theme toggle, responsive navigation and sign-out.
+[`shell.ts`](../Client/src/app/pages/shell.ts) provides the sidebar, top bar, role indicator, theme toggle, responsive navigation and sign-out.
 
 ### Pages and their responsibilities
 
 | Page/module | File | Responsibility |
 |---|---|---|
-| Authentication | [`auth.ts`](../task_management_frontend/src/app/pages/auth.ts) | Register and sign in; show request validation/API errors |
-| Dashboard | [`dashboard.ts`](../task_management_frontend/src/app/pages/dashboard.ts) | Render server-returned task counts, priority distribution, completion visualization and recent activity; same page for admin and user scopes |
-| Tasks | [`tasks.ts`](../task_management_frontend/src/app/pages/tasks.ts) | Task listing, filters, sorting, pagination, details dialog and create/edit/status/assign/delete operations |
-| Notifications | [`feeds.ts`](../task_management_frontend/src/app/pages/feeds.ts) | Notification list and mark-read actions; polls every 15 seconds while mounted |
-| Activity | [`feeds.ts`](../task_management_frontend/src/app/pages/feeds.ts) | Display latest server-authorized activity |
-| Team directory | [`feeds.ts`](../task_management_frontend/src/app/pages/feeds.ts) | Admin-only, read-only active user directory for assignment |
-| Reports and jobs | [`reports.ts`](../task_management_frontend/src/app/pages/reports.ts) | Start report jobs, poll job metadata every five seconds, and download the requester's completed export |
+| Authentication | [`auth.ts`](../Client/src/app/pages/auth.ts) | Register and sign in; show request validation/API errors |
+| Dashboard | [`dashboard.ts`](../Client/src/app/pages/dashboard.ts) | Render server-returned task counts, priority distribution, completion visualization and recent activity; same page for admin and user scopes |
+| Tasks | [`tasks.ts`](../Client/src/app/pages/tasks.ts) | Task listing, filters, sorting, pagination, details dialog and create/edit/status/assign/delete operations |
+| Notifications | [`feeds.ts`](../Client/src/app/pages/feeds.ts) | Notification list and mark-read actions; polls every 15 seconds while mounted |
+| Activity | [`feeds.ts`](../Client/src/app/pages/feeds.ts) | Display latest server-authorized activity |
+| Team directory | Tasks page and `GET /api/tasks/:id/assignees` | Task-scoped assignee lookup; general directory is admin-only |
+| Reports and jobs | [`reports.ts`](../Client/src/app/pages/reports.ts) | Start report jobs, poll paginated report metadata every five seconds only while visible report jobs are active, and download the requester's completed export |
 
 ### API client, state, guards and models
 
-- [`api.ts`](../task_management_frontend/src/app/core/api.ts) defines `Api`, a typed wrapper around Angular `HttpClient`, with methods for auth, dashboard, tasks, users, activity, notifications, jobs and reports.
-- `Auth` in the same file holds the signed-in user in an Angular signal, stores the token as `taskora_token` in `sessionStorage`, restores the current user through `/auth/me`, and handles logout.
-- The functional `authInterceptor` adds a Bearer token to protected `/api` calls and logs out on HTTP 401.
+- [`api.ts`](../Client/src/app/core/api.ts) defines `Api`, a typed wrapper around Angular `HttpClient`, with methods for auth, dashboard, tasks, users, activity, notifications, jobs and reports.
+- `Auth` holds the signed-in user in an Angular signal, restores it through `/auth/me`, and handles logout. Existing bearer tokens are stored in local storage.
+- The functional `authInterceptor` attaches the bearer JWT to API requests and clears the local session only after an explicit 401.
 - The functional `signedIn` and `roleGuard` route guards restore/check the session and role. They are user-experience controls, not substitutes for backend authorization.
-- [`models.ts`](../task_management_frontend/src/app/core/models.ts) contains TypeScript interfaces and enum-like string unions matching backend payloads.
+- [`models.ts`](../Client/src/app/core/models.ts) contains TypeScript interfaces and enum-like string unions matching backend payloads.
 - No shared component library, separate frontend validator module, or dedicated state store exists in this source tree.
 
 ### UI and styles
@@ -234,26 +237,26 @@ Page components call `Api` methods and keep view-specific data and loading/error
 
 | Layer | Location | Responsibility |
 |---|---|---|
-| Routes | [`src/routes/`](../task_management_backend/src/routes/) | Map HTTP verbs/paths to handlers and apply `protect` to private endpoints |
-| Controllers | [`src/controllers/`](../task_management_backend/src/controllers/) | Validate request shape, enforce resource-level permissions, invoke services, publish events and form responses |
-| Services | [`src/services/`](../task_management_backend/src/services/) | Task filters/queries, dashboard aggregation, activity and notification logic, job visibility and export generation |
-| Models | [`src/models/`](../task_management_backend/src/models/) | Define Mongoose schemas, validators, references, timestamps and indexes |
-| Middleware | [`src/middleware/`](../task_management_backend/src/middleware/) | Verify Bearer JWT/reload active user; normalize errors into API responses |
-| Utilities | [`src/utils/`](../task_management_backend/src/utils/) | Promise error forwarding, retry policy and CSV cell escaping |
-| Configuration | [`src/config/db.js`](../task_management_backend/src/config/db.js) | Connect Mongoose to `MONGO_URI` |
-| Events | [`src/events/`](../task_management_backend/src/events/) | Schedule task event listeners after successful task writes |
-| Background processing | [`src/queues/`](../task_management_backend/src/queues/) and [`src/workers/`](../task_management_backend/src/workers/) | Maintain FIFO in-memory jobs and run handlers with bounded concurrency/retries |
-| Scheduler | [`src/jobs/reminderScheduler.js`](../task_management_backend/src/jobs/reminderScheduler.js) | Periodically scan incomplete tasks for due-tomorrow and overdue reminders |
-| Tests | [`tests/`](../task_management_backend/tests/) | Unit-test retry/queue/CSV/error behavior and HTTP routes |
+| Routes | [`src/routes/`](../Server/src/routes/) | Map HTTP verbs/paths to handlers and apply `protect` to private endpoints |
+| Controllers | [`src/controllers/`](../Server/src/controllers/) | Validate request shape, enforce resource-level permissions, invoke services, publish events and form responses |
+| Services | [`src/services/`](../Server/src/services/) | Task filters/queries, dashboard aggregation, activity and notification logic, job visibility and export generation |
+| Models | [`src/models/`](../Server/src/models/) | Define Mongoose schemas, validators, references, timestamps and indexes |
+| Middleware | [`src/middleware/`](../Server/src/middleware/) | Verify bearer JWT/reload active user; normalize errors into API responses |
+| Utilities | [`src/utils/`](../Server/src/utils/) | Promise error forwarding, retry policy and CSV cell escaping |
+| Configuration | [`src/config/db.js`](../Server/src/config/db.js) | Connect Mongoose to `MONGO_URI` |
+| Events | [`src/events/`](../Server/src/events/) | Build compact task-event payloads |
+| Background processing | [`src/queues/`](../Server/src/queues/) and [`src/workers/`](../Server/src/workers/) | Persist jobs in MongoDB; atomically claim, lease and retry handlers |
+| Scheduler | [`src/jobs/reminderScheduler.js`](../Server/src/jobs/reminderScheduler.js) | Periodically scan incomplete tasks for due-tomorrow and overdue reminders |
+| Tests | [`tests/`](../Server/tests/) | Unit-test retry/queue/CSV/error behavior and HTTP routes |
 
 There is no standalone validators directory. `validateTask` and `validateListParams` in `taskService.js`, plus controller checks, implement validation.
 
 ### Selected backend module flows
 
 - **Authentication:** `authRoutes` → `authController` → `User` model; passwords are hashed with bcrypt on registration and compared on login. `auth.js` verifies tokens and reloads an active user per protected request.
-- **Task operation:** `taskRoutes` → `taskController` → validation and authorization → `taskService` → `Task`/`User` model. Successful task writes publish a task event.
+- **Task operation:** `taskRoutes` → `taskController` → validation and authorization → `taskService` → `Task`/`User` model. Task mutation, activity and notification jobs commit in one MongoDB transaction.
 - **Dashboard:** `dashboardRoutes` → `dashboardController` → `dashboardService`; parallel MongoDB counts/aggregations are scoped to the current user unless admin.
-- **Activity/notification:** task event listener → `JobQueue` → `QueueWorker` → handler → activity/notification service → Mongoose model. Event IDs and notification dedupe keys make retried writes idempotent.
+- **Activity/notification:** task transaction → durable `JobQueue` → `QueueWorker` → handler → activity/notification service → Mongoose model. Event IDs and notification dedupe keys make retried writes idempotent.
 - **Report:** report route/controller validates filters and enqueues a report job. `exportService` reloads the requester, applies the same visibility/filter query builder, streams rows or aggregates a summary, writes a temporary file and renames it when complete.
 - **Error:** rejected async handler → `asyncHandler` → Express `next(err)` → `errorHandler`; known custom, Mongoose, JSON parser and database errors receive mapped status/code/message.
 
@@ -263,18 +266,16 @@ There is no standalone validators directory. `validateTask` and `validateListPar
 sequenceDiagram
     participant C as Task controller
     participant DB as MongoDB
-    participant E as taskEvents publisher
+    participant E as Outbox jobs
     participant Q as JobQueue
     participant W as QueueWorker
     participant S as Activity/Notification service
-    C->>DB: Create/update/assign task
-    DB-->>C: Successful write
-    C->>E: publish(task event, task snapshot)
-    E-->>Q: setImmediate listener queues jobs
+    C->>DB: Task write + activity/notification jobs
+    DB-->>C: Transaction committed
     Q-->>W: ready event
     W->>S: Process activity and/or notification job
     S->>DB: Idempotent insert/upsert
-    Note over E,W: Async side effects may complete after HTTP response and in-memory events are not durable.
+    Note over E,W: Side effects may complete after the HTTP response; persisted jobs recover after restart.
 ```
 
 ## End-to-end workflows
@@ -283,9 +284,9 @@ sequenceDiagram
 
 1. The auth page submits credentials through `Api`.
 2. The backend validates and creates a user (registration always assigns `user`) or compares the supplied password with the stored bcrypt hash.
-3. The backend returns a public user and JWT.
-4. `Auth.accept` stores the token in `sessionStorage`, updates the user signal, and navigates to `/dashboard` or `/admin/dashboard`.
-5. On reload, `signedIn` calls `/api/auth/me`. The backend verifies the token and confirms the account is active.
+3. Registration returns a neutral response and requires a subsequent login; login returns a bearer JWT and public user.
+4. `Auth.accept` updates the user signal and navigates to `/dashboard` or `/admin/dashboard`.
+5. On reload, `signedIn` calls `/api/auth/me`. The backend verifies the bearer JWT and confirms the account is active.
 6. Route guards check roles for admin pages. Protected backend endpoints independently enforce authorization.
 
 ### Task creation and assignment
@@ -306,7 +307,7 @@ The UI submits status, priority, search, tags, due-date bounds, sort, order, pag
 flowchart TD
     A[Reports page submits filters + format] --> B[Submit report as JSON, CSV, or summary]
     B --> C[Validate filter keys and values]
-    C --> D[Create in-memory report job]
+    C --> D[Create MongoDB report job]
     D --> E[Return HTTP 202 and job metadata]
     D --> F[Worker processes report]
     F --> G[Reload active requester and apply task visibility]
@@ -328,14 +329,14 @@ The scheduler runs an initial check after startup and then repeats every `REMIND
 
 | Module | Key files | Responsibility, behavior and dependencies |
 |---|---|---|
-| Auth | `src/controllers/authController.js`, `src/routes/authRoutes.js`, `src/middleware/auth.js`, `src/models/User.js`; frontend `core/api.ts`, `pages/auth.ts` | Registration/login, public user payload, JWT issuance/verification, active-account check and protected session restoration |
-| Users/team | `src/controllers/userController.js`, `src/routes/userRoutes.js`; frontend `pages/feeds.ts` | Returns active users as a name/ID directory for assignment; UI is read-only and team route is admin-only |
-| Tasks | `src/controllers/taskController.js`, `src/services/taskService.js`, `src/routes/taskRoutes.js`, `src/models/Task.js`; frontend `pages/tasks.ts` | Ownership/assignee checks; field validation; list filtering, MongoDB aggregation pagination, sorting and CRUD/status/assignment |
+| Auth | `src/controllers/authController.js`, `src/routes/authRoutes.js`, `src/middleware/auth.js`, `src/models/User.js`; frontend `core/api.ts`, `pages/auth.ts` | Neutral registration, bearer-token login/logout, active-account check and protected session restoration |
+| Users/team | `src/controllers/userController.js`, `src/routes/userRoutes.js`; frontend `pages/tasks.ts` | Admin-only general directory; task owner/admin receive active assignee candidates from a task-scoped endpoint |
+| Tasks | `src/controllers/taskController.js`, `src/services/taskService.js`, `src/routes/taskRoutes.js`, `src/models/Task.js`; frontend `pages/tasks.ts` | Ownership/assignee checks; field validation; stale-edit detection; list filtering, MongoDB aggregation pagination, sorting and CRUD/status/assignment |
 | Dashboard | `src/controllers/dashboardController.js`, `src/services/dashboardService.js`, `src/routes/dashboardRoutes.js`; frontend `pages/dashboard.ts` | Counts total/completed/pending/in-progress/overdue tasks, priority distribution, recent activity and unread notifications |
 | Activity | `src/controllers/activityController.js`, `src/services/activityService.js`, `src/models/Activity.js`; frontend `pages/feeds.ts` | Writes deduplicated event records asynchronously; returns latest 50 records visible to the caller or all for admin |
 | Notifications | `src/controllers/notificationController.js`, `src/services/notificationService.js`, `src/models/Notification.js`; frontend `pages/feeds.ts` | Creates event/reminder notices, deduplicates, lists current user's notices, marks one or all read |
-| Jobs | `src/queues/jobQueue.js`, `src/workers/queueWorker.js`, `src/workers/jobHandlers.js`, `src/services/jobService.js`, `src/routes/jobRoutes.js`; frontend `pages/reports.ts` | Tracks in-memory work status/errors/results, retries eligible failures, exposes owner/admin metadata |
-| Reports | `src/controllers/reportController.js`, `src/services/exportService.js`, `src/routes/reportRoutes.js`, `src/utils/csvUtils.js`; frontend `pages/reports.ts` | Validates and schedules JSON/CSV/summary exports, streams files, protects CSV formula values and restricts downloads to requester |
+| Jobs | `src/queues/jobQueue.js`, `src/workers/queueWorker.js`, `src/workers/jobHandlers.js`, `src/services/jobService.js`, `src/routes/jobRoutes.js`; frontend `pages/reports.ts` | Persists work status/errors/results in MongoDB, recovers expired leases, retries eligible failures, exposes paginated owner/admin report metadata and hides internal jobs |
+| Reports | `src/controllers/reportController.js`, `src/services/exportService.js`, `src/routes/reportRoutes.js`, `src/utils/csvUtils.js`; frontend `pages/reports.ts` | Validates and schedules JSON/CSV/summary exports, limits row/byte sizes, streams files, protects CSV formula values and restricts downloads to requester |
 | Errors/utilities | `src/errors/AppError.js`, `src/middleware/errorHandler.js`, `src/utils/asyncHandler.js`, `src/utils/retry.js` | Typed HTTP errors, Express async propagation, centralized mapping and exponential retry |
 | Learning examples | `src/examples/classCallbacks.js`, `src/examples/promiseConcurrency.js` | Standalone Node demonstrations of callback `this` binding and Promise concurrency combinators |
 
@@ -404,7 +405,7 @@ erDiagram
 | Model | Important constraints and defaults | Indexes |
 |---|---|---|
 | `User` | Name required/trimmed/max 80; email required/unique/lowercase/trimmed; password required and hidden by default; role is `user` or `admin`, default `user`; `isActive` defaults true; timestamps | Unique email index (Mongoose `unique`) |
-| `Task` | Title required/trimmed/max 150; description default empty/max 2000; status defaults `Pending`; priority defaults `Medium`; due date defaults null; tags default empty; creator required; assignee optional; timestamps | `{ createdBy: 1, createdAt: -1 }`, `{ assignedTo: 1, createdAt: -1 }` |
+| `Task` | Title required/trimmed/max 150; description default empty/max 2000; status defaults `Pending`; priority defaults `Medium`; due date defaults null; tags default empty; creator required; assignee optional; timestamps | `{ createdBy: 1, createdAt: -1 }`, `{ assignedTo: 1, createdAt: -1 }`, `{ status: 1, dueDate: 1 }`, `{ tags: 1, createdAt: -1 }` |
 | `Activity` | Event enum; task, actor and message required; details defaults `{}`; visible user IDs; timestamps | Sparse unique `eventId`; `{ visibleTo: 1, createdAt: -1 }` |
 | `Notification` | Type enum; recipient/message/dedupe key required; `isRead` defaults false; task optional; timestamps | Unique `{ userId: 1, dedupeKey: 1 }`; `{ userId: 1, createdAt: -1 }` |
 
@@ -424,7 +425,8 @@ The backend enforces role and ownership in middleware/controllers/services. Publ
 | Change task status | No | Own or assigned tasks | Yes |
 | Read activity | No | Visible-to user records | All recent records |
 | Read/mark notifications | No | Own notifications | Own notifications |
-| Read user directory | No | Yes | Yes |
+| Read general user directory | No | No | Yes |
+| Look up task assignees | No | Owner/admin only | Yes |
 | View job metadata | No | Own jobs | All job metadata |
 | Download report | No | Own completed reports | Only reports requested by that admin |
 | Create/manage users or promote role | No | No | No API implemented |
@@ -433,7 +435,7 @@ Task routes use `protect` for authentication, then task-level checks. Admin acce
 
 ### JWT flow and restrictions
 
-`authController.js` signs HS256 tokens with `sub = user.id` and configured expiry. `middleware/auth.js` verifies Bearer format and HS256, reloads the active user on each protected request, and sets `req.user`. Registration hashes passwords using bcrypt cost 12. Password is excluded from normal Mongoose queries. The frontend stores the JWT in session-scoped browser storage; it is not an HttpOnly cookie.
+`authController.js` signs HS256 tokens with `sub = user.id` and configured expiry, and returns the token with the public user. `middleware/auth.js` verifies `Authorization: Bearer <token>` and reloads the active user on each protected request. The Angular client preserves the established bearer-token flow. Registration hashes passwords using bcrypt cost 12, returns the same neutral response for new and existing accounts, and does not sign in the user. Password is excluded from normal Mongoose queries.
 
 ## Configuration and local setup
 
@@ -446,7 +448,8 @@ Task routes use `protect` for authentication, then task-level checks. Admin acce
 Backend PowerShell:
 
 ```powershell
-cd task_management_backend
+cd Server
+copy .env.example .env
 npm.cmd install
 npm.cmd run dev
 ```
@@ -454,19 +457,20 @@ npm.cmd run dev
 Frontend PowerShell (separate terminal):
 
 ```powershell
-cd task_management_frontend
+cd Client
 npm.cmd install
 npm.cmd start
 ```
 
-The backend root README historically refers to `.env.example`, but the current workspace does not contain one. Create the ignored `task_management_backend\.env` file with local settings. Example values below are placeholders:
+Configure the copied, ignored `Server\.env` file. MongoDB must run as a replica set (or transaction-capable sharded cluster) because task and outbox writes use transactions. Example values below are placeholders:
 
 ```dotenv
-MONGO_URI=mongodb://127.0.0.1:27017/task_management
+MONGO_URI=mongodb://127.0.0.1:27017/task_management?replicaSet=rs0
 JWT_SECRET=<random-secret-of-at-least-32-characters>
 JWT_EXPIRES_IN=1d
 PORT=5000
 REMINDER_INTERVAL_MINUTES=60
+CLIENT_ORIGIN=http://localhost:4200
 # Optional, choose a private location: EXPORT_DIR=C:\private\taskora-exports
 ```
 
@@ -477,18 +481,19 @@ REMINDER_INTERVAL_MINUTES=60
 | `JWT_EXPIRES_IN` | No | JWT lifetime; default `1d` |
 | `PORT` | No | API port; default `5000` |
 | `REMINDER_INTERVAL_MINUTES` | No | Reminder interval; default `60`, minimum `1` |
-| `EXPORT_DIR` | No | Report destination; default `task_management_backend/exports`; use a non-public directory |
+| `CLIENT_ORIGIN` | No | Exact allowed browser origin; default `http://localhost:4200` |
+| `EXPORT_DIR` | No | Report destination; default `Server/exports`; use a non-public directory |
 
-The Angular app has no `.env` file or frontend secret. [`proxy.conf.json`](../task_management_frontend/proxy.conf.json) targets port 5000. The backend root endpoint is `http://localhost:5000/`; the app opens at `http://localhost:4200/login`.
+The Angular app has no `.env` file or frontend secret. [`proxy.conf.json`](../Client/proxy.conf.json) targets port 5000. The backend root endpoint is `http://localhost:5000/`; the app opens at `http://localhost:4200/login`.
 
 ### Tests and build
 
 ```powershell
-# In task_management_backend
+# In Server
 npm.cmd test
 npm.cmd run test:integration
 
-# In task_management_frontend
+# In Client
 npm.cmd run build
 ```
 
@@ -503,10 +508,12 @@ The backend tests do not require MongoDB for their current scenarios. Do not dir
 - Search terms are escaped before use in a MongoDB regular expression.
 - CSV output prefixes potentially executable spreadsheet formula values.
 - Account password storage uses bcrypt; JWT verification enforces HS256 and reloads active user state.
-- CORS is currently unrestricted (`cors()`); there is no configured rate limiter or CSP middleware.
+- Helmet security headers are enabled. CORS allows configured `CLIENT_ORIGIN` values, defaulting to `http://localhost:4200`.
+- Login and registration are limited to 10 requests per IP address per 15 minutes. The limiter uses an in-memory store.
 - Frontend route guards and the UI are not security boundaries. The backend enforces ownership and role checks.
-- Browser JWT storage is `sessionStorage`; production deployments should assess XSS exposure and consider a secure HttpOnly cookie design.
-- Export files should be stored outside public static directories. The project does not implement file retention/cleanup.
+- Bearer-token authentication remains compatible with existing client sessions.
+- Export files should be stored outside public static directories. Files expire after 24 hours and are cleaned hourly; downloads reject expired files.
+- Report requests are limited to five per user per rolling hour using process-local counters.
 
 This is not a production-hardened system. Configure production CORS, TLS, request throttling, secret management and operational controls before deployment.
 
@@ -529,24 +536,22 @@ Status reflects implementation in the current workspace, not a claim that every 
 |---|---|---|---|
 | Account registration and login | Implemented | Backend auth controller/model/middleware; frontend auth page | Regular-user registration only |
 | Role-scoped dashboards | Implemented | Dashboard service/controller; frontend dashboard/routes | Uses one dashboard component with backend-scoped counts |
-| Task CRUD and assignment | Implemented | Task routes/controller/service/model; frontend tasks page | Owner/admin edits/deletes/assigns; assignee can change status |
+| Task CRUD and assignment | Implemented | Task routes/controller/service/model; frontend tasks page | Owner/admin edits/deletes/assigns; assignee can change status; stale edits conflict |
 | Filtering, sorting, pagination | Implemented | `taskService.js`; frontend tasks page | Server-side; filters include text/tags/date/status/priority |
-| Activity feed | Implemented | Event services/model; frontend feeds | Async; not durable across process failure |
+| Activity feed | Implemented | Event services/model; frontend feeds | Durable asynchronous processing; deletion retains activity history |
 | Notifications and reminders | Implemented | Notification service/model; reminder scheduler; frontend feeds | Deduplicated writes; reminder checks are timer based |
-| In-process job queue/retries | Implemented with durability limitation | Queue, worker and job handlers | Jobs disappear on restart; retries are process-local |
-| JSON/CSV/summary reports | Implemented with operational limitations | Report controller/export service; frontend reports | CSV formula protection and requester-only download |
+| MongoDB job queue/retries | Implemented | Queue, worker and job handlers | Transactions require a replica set or sharded cluster |
+| JSON/CSV/summary reports | Implemented with operational limits | Report controller/export service; frontend reports | 50,000-row/25 MiB caps, CSV formula protection and requester-only download |
 | Admin team directory | Implemented, read-only | User controller; frontend team page | No user-management mutation API |
 | Frontend unit/e2e tests | Not implemented | — | No frontend test command configured |
-| Durable distributed jobs/retention | Not implemented | — | Suggested production enhancement |
-| Rate limiting/restrictive CORS/monitoring | Not implemented | — | Suggested production enhancement |
+| Auth rate limiting, restrictive CORS and Helmet | Implemented | Auth middleware, `app.js` | In-memory IP limiter; configure `CLIENT_ORIGIN` |
 
 ## Future enhancements
 
 These are recommendations, not current features:
 
-- Replace process-local queue with a durable queue and persist job state; use an outbox for reliable event delivery.
-- Add report retention, cleanup, size limits and export access revocation when permissions change.
-- Configure restrictive CORS, HTTPS, rate limiting, secure cookie-based session design where appropriate, and security headers.
+- Use shared rate-limit and export-quota stores for multi-process deployments, and revoke export access when permissions change.
+- Configure HTTPS, shared rate-limit/quota stores for multi-process deployments, broader API rate limits, and operational security controls.
 - Add request correlation IDs, structured logs, metrics, tracing, health/readiness endpoints and alerting.
 - Add MongoDB-backed integration tests with isolated test databases and frontend unit/e2e coverage.
 - Add schema/API contract validation shared between client and server, plus automated API documentation generation.
@@ -561,10 +566,10 @@ These are recommendations, not current features:
 | Backend exits with JWT secret error | `JWT_SECRET` is absent or shorter than 32 characters | Set a private random secret in backend `.env`; do not commit it |
 | Backend cannot connect to MongoDB | MongoDB is stopped or `MONGO_URI` is wrong | Start MongoDB and verify the URI/database access |
 | Frontend shows “Cannot connect to backend” | API is stopped or proxy points at wrong port | Start backend on port 5000 or update `proxy.conf.json`, then restart Angular |
-| Protected request returns 401 | No token, invalid/expired JWT, or inactive account | Sign in again and verify backend account status |
+| Protected request returns 401 | Missing/invalid/expired bearer token or inactive account | Sign in again and verify backend account status |
 | Admin page redirects to user dashboard/login | Account role is not `admin` or the session cannot restore | Use an admin account provisioned through a trusted workflow |
 | Report stays pending/failed | Worker not running, job handler error, MongoDB issue, or export path permission problem | Inspect backend logs and job metadata; verify `EXPORT_DIR` is writable |
-| Download returns not ready or not found | Job has not completed, was created by another user, or in-memory job metadata was lost on restart | Poll the job while backend is running; download using the original requester session |
+| Download returns not ready or not found | Job has not completed, was created by another user, or its retained metadata expired | Poll the job while backend is running; download using the original requester session |
 | `npm` command is blocked in PowerShell | Execution policy blocks the npm PowerShell shim | Use `npm.cmd` as shown in the setup commands |
 | Angular build reports dependency/version issues | Incompatible local Node version or incomplete dependency install | Use the recommended Node 22 version and run `npm.cmd install` inside the frontend |
 

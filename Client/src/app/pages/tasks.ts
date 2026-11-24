@@ -154,7 +154,7 @@ import {
             <td>
               {{ t.dueDate ? (t.dueDate | date: "mediumDate" : "UTC") : "—" }}
             </td>
-            <td>{{ person(t.assignedTo) }}</td>
+            <td>{{ t.assignedToName || person(t.assignedTo) }}</td>
             <td>
               <div class="row-actions">
                 <p-button
@@ -230,8 +230,8 @@ import {
                 : "—"
             }}
           </div>
-          <div><b>Owner:</b> {{ person(selected.createdBy) }}</div>
-          <div><b>Assignee:</b> {{ person(selected.assignedTo) }}</div>
+          <div><b>Owner:</b> {{ selected.createdByName || person(selected.createdBy) }}</div>
+          <div><b>Assignee:</b> {{ selected.assignedToName || person(selected.assignedTo) }}</div>
           <div><b>Tags:</b> {{ selected.tags.join(", ") || "—" }}</div>
         </div>
       }
@@ -295,15 +295,41 @@ import {
         </form>
       }
       @if (mode === "status") {
-        <label
-          >New status<p-select [(ngModel)]="newStatus" [options]="statuses"
-        /></label>
-        <div class="actions">
-          <p-button
-            label="Update status"
-            [loading]="saving"
-            (onClick)="save()"
-          />
+        <div class="status-dialog-form">
+          @if (selected) {
+            <div class="status-task-info">
+              <span class="status-task-icon"><i class="pi pi-list-check"></i></span>
+              <div>
+                <small>Updating task</small>
+                <strong>{{ selected.title }}</strong>
+              </div>
+            </div>
+          }
+          <label class="status-label">
+            New status
+            <p-select
+              [(ngModel)]="newStatus"
+              [options]="statuses"
+              [style]="{ width: '100%' }"
+              appendTo="body"
+              scrollHeight="180px"
+            />
+          </label>
+          <div class="status-actions">
+            <p-button
+              label="Cancel"
+              [text]="true"
+              [disabled]="saving"
+              (onClick)="visible = false"
+            />
+            <p-button
+              label="Update status"
+              icon="pi pi-check"
+              [loading]="saving"
+              [disabled]="!newStatus || saving"
+              (onClick)="save()"
+            />
+          </div>
         </div>
       }
      
@@ -366,11 +392,11 @@ import {
       />
 
       <p-button
-        label="Assign task"
+        [label]="assignee ? 'Assign task' : 'Unassign task'"
         icon="pi pi-user-plus"
         [loading]="saving"
-        [disabled]="!assignee || saving"
-        (onClick)="save()"
+        [disabled]="saving"
+          (onClick)="save()"
       />
 
     </div>
@@ -432,7 +458,7 @@ export class TasksPage implements OnInit {
   due = "";
   tagText = "";
   newStatus: Status = "Pending";
-  assignee = "";
+  assignee: string | null = null;
   defaults() {
     return {
       search: "",
@@ -457,10 +483,6 @@ export class TasksPage implements OnInit {
   }
   ngOnInit() {
     void this.load();
-    this.api
-      .users()
-      .then((r) => (this.people = r.users))
-      .catch((e) => (this.error = errorText(e)));
   }
   async load() {
     this.busy = true;
@@ -551,8 +573,13 @@ export class TasksPage implements OnInit {
     this.open("status", "Update status", t);
   }
   assign(t: Task) {
-    this.assignee = t.assignedTo || "";
+    this.assignee = t.assignedTo;
     this.open("assign", "Assign task", t);
+    this.people = [];
+    this.api
+      .assignees(t._id)
+      .then((r) => (this.people = r.users))
+      .catch((e) => (this.dialogError = errorText(e)));
   }
   remove(t: Task) {
     this.open("delete", "Delete task", t);
@@ -576,7 +603,12 @@ export class TasksPage implements OnInit {
         if (!body.title) throw Error("Title is required");
         if (body.tags.length > 20 || body.tags.some((t) => t.length > 40))
           throw Error("Up to 20 tags, each at most 40 characters");
-        if (this.selected) await this.api.editTask(this.selected._id, body);
+        if (this.selected)
+          await this.api.editTask(
+            this.selected._id,
+            body,
+            this.selected.updatedAt,
+          );
         else await this.api.createTask(body);
       } else if (this.selected) {
         const id = this.selected._id;

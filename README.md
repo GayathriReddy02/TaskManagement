@@ -1,137 +1,86 @@
-# Taskora | Task Management Workspace
+# Task Management Backend — Milestones 1–3
 
-Taskora is a task management workspace with an Angular web client and an Express/MongoDB API. It supports account sign-in, role-scoped dashboards, task assignment and tracking, activity and reminders, and asynchronous report exports.
+Stack: Node.js, Express, MongoDB/Mongoose, JWT, bcryptjs. No frontend.
 
-> **Project scope:** This repository contains both a frontend and backend. Public registration creates regular users only; an administrator account must be provisioned through a trusted backend workflow.
+## Run
+1. `npm install`
+2. Copy `Server/.env.example` to `Server/.env`, set a private `JWT_SECRET` of at least 32 characters, and start MongoDB as a replica set (required for transactions).
+3. `npm run dev`
+4. Open http://localhost:5000/ .
 
-## Contents
+## Routes
+- `POST /api/auth/register` JSON `{ "name":"Alex", "email":"alex@example.com", "password":"Password123" }`
+- `POST /api/auth/login` JSON `{ "email":"alex@example.com", "password":"Password123" }` -> bearer token and user
+- `POST /api/auth/logout` -> ends the client session
+- `GET /api/auth/me` protected
+- `GET /api/users` admin-only active user directory
+- `POST /api/tasks` protected; fields title, description, status, priority, dueDate (YYYY-MM-DD), tags
+- `GET /api/tasks` protected; query status,priority,search,tags,fromDate,toDate,sortBy,order,page,limit
+- `GET /api/tasks/:id` protected
+- `GET /api/tasks/:id/assignees` protected; task owner/admin only
+- `PUT /api/tasks/:id` protected; owner/admin may edit with an `If-Match` timestamp
+- `PATCH /api/tasks/:id/status` protected; owner/assignee/admin may update status
+- `PATCH /api/tasks/:id/assign` protected; body `{ "assignedTo":"userMongoId" }`; owner/admin only
+- `DELETE /api/tasks/:id` protected; owner/admin only
 
-- [Project overview](#project-overview)
-- [Technology stack](#technology-stack)
-- [Architecture at a glance](#architecture-at-a-glance)
-- [Quick start](#quick-start)
-- [Key features](#key-features)
-- [Documentation](#documentation)
-- [Project structure](#project-structure)
-- [Limitations](#limitations)
+## Permissions
+Registration always creates `user`; public request bodies cannot specify admin, createdBy, assignedTo, timestamps. Users see their own created/assigned tasks. Task owner/admin edits fields, deletes, assigns; assignee may update status. No public admin-creation API. For a real Admin user, provision one out-of-band via a trusted administrator workflow.
 
-## Project overview
+## Notes
+- Dates are treated as UTC calendar dates; date-range is inclusive of `toDate`.
+- `tags=a,b` matches at least one of the two tags.
+- Priority sorting maps High=3, Medium=2, Low=1.
+- Middleware validates bearer JWTs and reloads the active user from MongoDB. Existing bearer-token login remains in place; no cookie or CSRF token is required.
+- Task edits require the `If-Match` header from the task's `updatedAt`; stale edits return HTTP 409.
+- Deleting a task is owner/admin-only, removes notifications for all recipients, and preserves activity history.
+- Valid registration requests return the same neutral response and require a subsequent login.
+- Login and registration are limited to 10 requests per IP per 15 minutes. CORS allows `CLIENT_ORIGIN` (defaults to `http://localhost:4200`); set a comma-separated list for multiple frontend origins.
 
-Taskora brings task ownership, assignments, due dates, priorities, and status tracking into one workspace. It helps individuals and teams see their authorized work, coordinate task changes, monitor deadlines, and export task data.
+## Milestones 4–7 additions
+- `GET /api/activities` — recent activity (admin: all, users: events involving them at the time).
+- `GET /api/notifications` — current user's notifications and unread count.
+- `PATCH /api/notifications/:id/read` — mark one owned notification read.
+- `PATCH /api/notifications/read-all` — mark current user's notifications read.
+- `GET /api/dashboard` — authorized task counts, byPriority, recent activity.
+- `REMINDER_INTERVAL_MINUTES` in `.env` controls periodic due-date checks; starts after MongoDB connection.
+- `node src/examples/promiseConcurrency.js` demonstrates all/allSettled/race/any.
+- Activity and notification jobs are stored in MongoDB in the same transaction as task creation, updates, status changes, and assignments. Workers may finish shortly after the HTTP response.
+- Overdue is **derived** from `dueDate < today UTC` for incomplete tasks. The existing status enum remains unchanged.
+- Due-soon reminder applies to tasks due tomorrow (UTC); overdue notifications are deduplicated.
+- Activity and notification records are added to MongoDB, but old tasks do not automatically produce historical activity records.
 
-## Technology stack
+## Milestones 8–12 — additive upgrade
+This update uses the uploaded CommonJS backend as its baseline. Existing routes, task status/priority values, ownership checks, reminder scheduler and environment variable names are retained. The upload contained asynchronous event listeners but no tracked job queue, so milestone 8 was added as a prerequisite. Node 20+ recommended.
 
-| Area | Technologies | Purpose |
-|---|---|---|
-| Frontend | Angular 19, TypeScript, Angular Router, RxJS | Standalone, lazy-loaded browser application with typed API contracts |
-| UI | PrimeNG 19, Aura theme, PrimeIcons, CSS | UI controls, icons, responsive workspace layout and theme styling |
-| Backend | Node.js, Express 4, CommonJS | HTTP API, request handling and application lifecycle |
-| Data | MongoDB, Mongoose 8 | Persistent users, tasks, activities and notifications |
-| Authentication | JWT (HS256), bcryptjs | Bearer-token authentication and password hashing |
-| Async work | Node.js EventEmitter, timers and in-memory queue | Activity/notification jobs, retries, reminders and report generation |
-| Tests | Node.js built-in test runner | Backend unit and HTTP API tests |
+### New APIs (bearer token required)
+- `POST /api/reports/json`, `/api/reports/csv`, `/api/reports/summary`: optional JSON body with `status`, `priority`, `search`, `tags`, `fromDate`, `toDate` (same semantics as task filters). Empty body `{}` exports all visible tasks, not just one page. Returns HTTP 202 and `{job: {id, status, ...}}`.
+- `GET /api/jobs?page=1&limit=10`: paginated report jobs owned by the user (admin sees all report job metadata); internal jobs are never exposed. Returns `jobs`, `page`, `limit`, `total`, `activeCount`.
+- `GET /api/jobs/:id`: poll job status: pending, processing, completed, failed. `attempts`, `errors`, `nextRetryAt`, `result` are recorded. Detailed error messages are admin-only.
+- `GET /api/reports/download/:id`: downloads a completed export using its job ID; only the requester can download. Returns 409 if not ready. Files are stored in `exports/` unless `EXPORT_DIR` is set. Use a dedicated non-public directory.
+- Report requests are limited to 5 per user per rolling hour. Generated export files expire after 24 hours; cleanup runs hourly and expired files are rejected at download time.
+- CSV/JSON exports are limited to 50,000 rows and 25 MiB.
 
-## Architecture at a glance
+### Implementation details
+- Task activity/notification jobs, report jobs, job status, retries and results are persisted in MongoDB. Workers atomically claim jobs, renew processing leases, and reclaim expired leases after a restart. The worker processes up to two jobs concurrently by default. Three retries follow the initial attempt with 1s/2s/4s delays; invalid jobs fail without retry. Activity event IDs and notification dedupe keys prevent duplicate records on retries. Existing reminder checks still use the notification service directly.
+- Exports use the same ownership and filter query builder as task listing, reload the account at execution time, and stream MongoDB cursor rows to temporary files. A summary uses a MongoDB aggregation. Successful files are renamed into place. CSV protects against formula injection. JSON exports are arrays.
+- `TaskService`, `NotificationService`, and `QueueWorker` are classes. Existing service exports remain available. Run `node src/examples/classCallbacks.js` to see lost `this`, bind, call, apply, and wrapper callbacks.
+- Centralized error middleware handles malformed JSON, custom errors, Mongoose validation/cast errors, duplicate keys and common database connectivity errors. Existing response `message` is retained; centralized errors additionally include `success`, `code`, and `statusCode`. Some existing controller validation paths still return their original direct responses.
 
-```mermaid
-flowchart LR
-    Browser[Angular + PrimeNG frontend] -->|HTTP /api with Bearer JWT| Express[Express API]
-    Express -->|Mongoose queries| Mongo[(MongoDB)]
-    Express -->|Events| Queue[In-memory job queue and worker]
-    Queue --> Mongo
-    Queue --> Files[Report files in exports directory]
-    Browser -->|Development proxy /api| Express
-```
+### Testing
+Run `npm test` for unit tests and HTTP integration tests that do not require MongoDB. `tests/jobRetention.test.js` covers retention, capacity, exclusive claims, stale lease recovery, retries and terminal result cleanup using a persistence test double. Full authenticated CRUD, transaction rollback, report generation against MongoDB, and download integration remain to be tested with an isolated replica-set test database. Never point test data operations at a production database.
 
-The Angular development server runs on port `4200` and proxies `/api` to the backend on port `5000`. Backend authorization remains the source of truth; frontend guards only control navigation and display.
+### Limitations
+MongoDB must run as a replica set (or transaction-capable sharded cluster) because task writes and their outbox jobs commit atomically. A standalone MongoDB server will reject task writes that require transactions. For a local single-node replica set, initialize MongoDB with a replica-set name and include the matching `replicaSet` parameter in `MONGO_URI` (the example uses `rs0`). Report quota counters and rate-limit counters remain process-local. Historical report access is not automatically revoked when task permissions change. Terminal job records expire automatically and can be evicted sooner under capacity pressure; pending/processing/retrying jobs are never evicted. Export files are deleted after 24 hours. `.env` and `node_modules` are intentionally not distributed; copy `.env.example` and install dependencies with `npm ci`.
 
-## Quick start
-
-### Prerequisites
-
-- Node.js 20+ (Node.js 22 is recommended for the Angular setup)
-- npm
-- A running MongoDB instance
-
-### 1. Configure and run the backend
-
-In PowerShell, open a terminal in `task_management_backend`:
-
-```powershell
-npm.cmd install
-```
-
-Create `task_management_backend\.env` locally (there is no checked-in `.env.example`):
+### Job retention settings
+Optional variables in your existing local `.env` (positive integers):
 
 ```dotenv
-MONGO_URI=mongodb://127.0.0.1:27017/task_management
-JWT_SECRET=<generate-a-random-secret-at-least-32-characters-long>
-JWT_EXPIRES_IN=1d
-PORT=5000
-REMINDER_INTERVAL_MINUTES=60
-# Optional: EXPORT_DIR=C:\path\to\private\exports
+JOB_CAPACITY=10000
+JOB_COMPLETED_RETENTION_MS=86400000
+JOB_FAILED_RETENTION_MS=604800000
+JOB_CLEANUP_INTERVAL_MS=60000
+JOB_PROCESSING_LEASE_MS=300000
 ```
 
-Use your own randomly generated secret; do not commit `.env` or use the placeholder above as a secret. Start MongoDB, then run:
-
-```powershell
-npm.cmd run dev
-```
-
-### 2. Run the frontend
-
-In a second PowerShell terminal, open `task_management_frontend`:
-
-```powershell
-npm.cmd install
-npm.cmd start
-```
-
-Open [http://localhost:4200/login](http://localhost:4200/login). The Angular dev proxy forwards `/api` requests to `http://localhost:5000`; update [`task_management_frontend/proxy.conf.json`](task_management_frontend/proxy.conf.json) if the backend port changes.
-
-### 3. Run backend tests
-
-In `task_management_backend`:
-
-```powershell
-npm.cmd test
-npm.cmd run test:integration
-```
-
-For the Angular production build:
-
-```powershell
-npm.cmd run build
-```
-
-## Key features
-
-- Registration and sign-in; JWT session restoration and role-aware navigation.
-- User and admin dashboards backed by server-scoped task metrics.
-- Task creation, editing, assignment, status changes, filtering, sorting and pagination.
-- Activity feed and notification inbox, including due-soon and overdue reminders.
-- In-memory background jobs with bounded concurrency and exponential retries.
-- Asynchronous JSON, CSV and summary report generation, job polling and requester-only downloads.
-
-## Documentation
-
-- [Architecture and onboarding guide](docs/ARCHITECTURE.md) — modules, workflows, data model, permissions, setup, testing, milestones and troubleshooting.
-- [API reference](docs/API.md) — endpoints, authorization, request parameters and example responses.
-- [Backend specification](task_management_backend/SPECIFICATION.md) — detailed backend behavior and implementation notes.
-- [Backend update notes](task_management_backend/UPDATE_NOTES.md) — additive backend changes.
-- [Frontend README](task_management_frontend/README.md) — frontend feature-to-API mapping and local validation checklist.
-
-## Project structure
-
-```text
-TaskManagement/
-├── docs/                         # Project architecture and API reference
-├── task_management_backend/      # Express API, MongoDB models and tests
-└── task_management_frontend/     # Angular standalone application
-```
-
-See the [complete source tree and module guide](docs/ARCHITECTURE.md#folder-structure).
-
-## Limitations
-
-The queue and job status are in memory and reset when the backend restarts. CORS is permissive, and frontend JWTs are stored in `sessionStorage`. This is a learning baseline rather than a production-hardened deployment; recommendations are documented in the [architecture guide](docs/ARCHITECTURE.md#future-enhancements).
+Capacity includes queued, processing, retrying, and retained terminal jobs. At capacity, expired jobs and then oldest finished jobs are reclaimed, prioritizing internal jobs. If there is insufficient reclaimable space, task mutations requiring events and report submissions return HTTP 503 without committing the task write or job enqueue. Completed reports may become unavailable before their configured expiry if capacity is exhausted.

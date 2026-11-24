@@ -24,9 +24,17 @@ function errorHandler(err, req, res, next) {
     status = 413;
     message = "Request too large";
     code = "PAYLOAD_TOO_LARGE";
+  } else if (
+    err.code === 20 &&
+    err.codeName === "IllegalOperation" &&
+    err.message === "Transaction numbers are only allowed on a replica set member or mongos"
+  ) {
+    status = 503;
+    message = "MongoDB transactions require a replica set. Configure MongoDB as a replica set and retry.";
+    code = "TRANSACTIONS_REQUIRED";
   } else if (err.code === 11000) {
     status = 409;
-    message = "Email already registered";
+    message = "Request conflicts with existing data";
     code = "CONFLICT";
   } else if (
     [

@@ -1,5 +1,6 @@
 const express = require("express");
 const cors = require("cors");
+const helmet = require("helmet");
 const authRoutes = require("./routes/authRoutes");
 const userRoutes = require("./routes/userRoutes");
 const taskRoutes = require("./routes/taskRoutes");
@@ -9,7 +10,19 @@ const notificationRoutes = require("./routes/notificationRoutes");
 const dashboardRoutes = require("./routes/dashboardRoutes");
 
 const app = express();
-app.use(cors()); // Restrict allowed origins before production deployment.
+const allowedOrigins = (process.env.CLIENT_ORIGIN || "http://localhost:4200")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+app.use(helmet());
+app.use(
+  cors({
+    origin: (origin, callback) =>
+      callback(null, !origin || allowedOrigins.includes(origin)),
+    credentials: true,
+  }),
+);
 app.use(express.json({ limit: "20kb" }));
 
 app.get("/", (req, res) =>

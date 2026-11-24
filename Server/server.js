@@ -2,11 +2,14 @@ require("dotenv").config();
 const app = require("./src/app");
 const connectDB = require("./src/config/db");
 
-const { registerListeners } = require("./src/events/registerListeners");
 const { startReminderScheduler } = require("./src/jobs/reminderScheduler");
 const { queue } = require("./src/queues/jobQueue");
 const { QueueWorker } = require("./src/workers/queueWorker");
 const handlers = require("./src/workers/jobHandlers");
+const {
+  cleanupExpiredFiles,
+  startExportCleanup,
+} = require("./src/services/exportService");
 const worker = new QueueWorker(queue, handlers);
 const port = process.env.PORT || 5000;
 
@@ -19,7 +22,11 @@ async function start() {
     require("./src/models/Activity").init(),
     require("./src/models/Notification").init(),
   ]);
-  registerListeners();
+  await queue.initialize();
+  await cleanupExpiredFiles();
+  await queue.cleanup();
+  queue.startCleanup();
+  startExportCleanup();
   worker.start();
   startReminderScheduler();
   app.listen(port, () =>

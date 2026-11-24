@@ -92,6 +92,18 @@ import { Dashboard, Priority } from "../core/models";
           <a routerLink="/tasks">View tasks <i class="pi pi-arrow-right"></i></a
         ></p-card>
       </div>
+      <p-card header="Tasks by tag">
+        <div class="legend">
+          @for (item of d.byTag; track item.tag) {
+            <span>
+              <b class="dot violet"></b>{{ item.tag }}
+              <strong>{{ item.count }}</strong>
+            </span>
+          } @empty {
+            <p class="empty">No tagged tasks yet.</p>
+          }
+        </div>
+      </p-card>
       <p-card header="Recent activity"
         ><div class="feed">
           @for (a of d.recentActivity; track a._id) {

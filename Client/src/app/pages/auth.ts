@@ -31,7 +31,10 @@ import { Api, Auth, errorText } from "../core/api";
               : "Sign in to organize your work and stay on track."
           }}
         </p>
-        <form (ngSubmit)="submit()" #form="ngForm">
+        @if (registeredMessage) {
+          <div class="muted" role="status">{{ registeredMessage }}</div>
+        } @else {
+          <form (ngSubmit)="submit()" #form="ngForm">
           @if (register) {
             <label
               >Full name<input
@@ -77,7 +80,8 @@ import { Api, Auth, errorText } from "../core/api";
             [disabled]="form.invalid || busy"
             styleClass="wide"
           />
-        </form>
+          </form>
+        }
         <p class="muted">
           {{ register ? "Already registered?" : "New to Taskora?" }}
           <a [routerLink]="register ? '/login' : '/register'">{{
@@ -111,6 +115,7 @@ export class AuthPage {
   password = "";
   busy = false;
   error = "";
+  registeredMessage = "";
   async submit() {
     if (this.busy) return;
     this.error = "";
@@ -125,15 +130,21 @@ export class AuthPage {
     }
     this.busy = true;
     try {
-      await this.auth.accept(
-        await (this.register
-          ? this.api.register(
+      if (this.register) {
+        const response = await this.api.register(
               this.name.trim(),
               this.email.trim(),
               this.password,
-            )
-          : this.api.login(this.email.trim(), this.password)),
-      );
+            );
+        this.registeredMessage = response.message;
+      } else {
+        const response = await this.api.login(
+          this.email.trim(),
+          this.password,
+        );
+        localStorage.setItem("token", response.token);
+        await this.auth.accept(response.user);
+      }
     } catch (e) {
       this.error = errorText(e);
     } finally {

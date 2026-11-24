@@ -1,24 +1,27 @@
 const Activity = require("../models/Activity");
-const { emitter } = require("../events/taskEvents");
-const { queue } = require("../queues/jobQueue");
-const EVENTS = ["taskCreated", "taskUpdated", "taskAssigned", "taskCompleted"];
 
 async function record(event, payload) {
-  const { task, actorId, eventId, details = {} } = payload;
+  const { taskId, title, creatorId, assigneeId, actorId, eventId, details = {} } = payload;
+  const messages = {
+    taskCreated: `Created task: ${title}`,
+    taskUpdated: `Updated task: ${title}`,
+    taskAssigned: `Changed task assignment: ${title}`,
+    taskCompleted: `Completed task: ${title}`,
+  };
   const viewers = [
     ...new Set([
       String(actorId),
-      String(task.createdBy),
-      ...(task.assignedTo ? [String(task.assignedTo)] : []),
+      creatorId,
+      ...(assigneeId ? [String(assigneeId)] : []),
       ...(details.previousAssignee ? [String(details.previousAssignee)] : []),
     ]),
   ];
   const document = {
-    taskId: task._id,
+    taskId: taskId,
     actorId,
     event,
     details,
-    message: `${event}: ${task.title}`,
+    message: messages[event] || `Changed task: ${title}`,
     visibleTo: viewers,
   };
   if (!eventId) return Activity.create(document);
@@ -32,11 +35,4 @@ async function record(event, payload) {
     if (e.code !== 11000) throw e;
   }
 }
-function registerActivityListeners() {
-  for (const event of EVENTS) {
-    emitter.on(event, (payload) =>
-      queue.add("activity", { event, payload }, payload.actorId),
-    );
-  }
-}
-module.exports = { registerActivityListeners, record };
+module.exports = { record };

@@ -199,7 +199,7 @@ async function listTasks(user, params) {
       tasks: [
         { $skip: (page - 1) * limit },
         { $limit: limit },
-        { $project: { priorityRank: 0 } },
+        { $project: { priorityRank: 0, notificationVersion: 0 } },
       ],
       metadata: [{ $count: "total" }],
     },
@@ -215,21 +215,29 @@ async function listTasks(user, params) {
   };
 }
 
-async function assignTask(task, userId) {
-  if (!validId(userId)) return { error: "Invalid user ID", code: 400 };
-  const assignee = await User.findById(userId);
-  if (!assignee || !assignee.isActive)
-    return { error: "Active user not found", code: 404 };
-  task.assignedTo = assignee._id;
-  await task.save();
+async function assignTask(task, userId, beforeChange = () => {}, session) {
+  if (userId !== null && !validId(userId))
+    return { error: "Invalid user ID", code: 400 };
+  let assignee = null;
+  if (userId !== null) {
+    assignee = await User.findById(userId);
+    if (!assignee || !assignee.isActive)
+      return { error: "Active user not found", code: 404 };
+  }
+  const nextAssigneeId = assignee?._id ?? null;
+  if (String(task.assignedTo || "") !== String(nextAssigneeId || ""))
+    beforeChange();
+  task.assignedTo = nextAssigneeId;
+  await task.save(session ? { session } : undefined);
   return { task };
 }
 class TaskService {
   constructor(model = Task) {
     this.model = model;
   }
-  create(data) {
-    return this.model.create(data);
+  async create(data, session) {
+    const result = await this.model.create(session ? [data] : data, session ? { session } : undefined);
+    return Array.isArray(result) ? result[0] : result;
   }
   findById(id) {
     return this.model.findById(id);
@@ -237,14 +245,25 @@ class TaskService {
   list(user, params) {
     return listTasks(user, params);
   }
-  assign(task, userId) {
-    return assignTask(task, userId);
+  assign(task, userId, beforeChange, session) {
+    return assignTask(task, userId, beforeChange, session);
   }
-  save(task) {
-    return task.save();
+  save(task, session) {
+    return task.save(session ? { session } : undefined);
   }
-  remove(task) {
-    return task.deleteOne();
+  updateIfUnchanged(id, updatedAt, changes, session) {
+    return this.model.findOneAndUpdate(
+      { _id: id, updatedAt },
+      { $set: changes },
+      {
+        new: true,
+        runValidators: true,
+        ...(session ? { session } : {}),
+      },
+    );
+  }
+  remove(task, session) {
+    return task.deleteOne(session ? { session } : undefined);
   }
 }
 const taskService = new TaskService();

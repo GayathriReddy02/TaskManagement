@@ -4,7 +4,11 @@ const asyncHandler = require("../utils/asyncHandler");
 const { queue } = require("../queues/jobQueue");
 const { validateListParams } = require("../services/taskService");
 const { getJob, publicJob } = require("../services/jobService");
-const { exportDir } = require("../services/exportService");
+const {
+  exportDir,
+  withExportQuota,
+  EXPORT_RETENTION_MS,
+} = require("../services/exportService");
 const {
   ValidationError,
   NotFoundError,
@@ -31,15 +35,17 @@ const requestExport = (format) =>
       throw new ValidationError("Invalid export filters");
     const error = validateListParams(filters);
     if (error) throw new ValidationError(error);
-    const job = queue.add(
-      "report",
-      { userId: String(req.user._id), format, filters },
-      req.user._id,
+    const job = await withExportQuota(req.user._id, () =>
+      queue.add(
+        "report",
+        { userId: String(req.user._id), format, filters },
+        req.user._id,
+      ),
     );
     res.status(202).json({ job: publicJob(job, req.user) });
   });
 const download = asyncHandler(async (req, res, next) => {
-  const job = getJob(req.params.id, req.user);
+  const job = await getJob(req.params.id, req.user);
   if (job.type !== "report") throw new NotFoundError("Report not found");
   if (job.status !== "completed")
     throw new AppError("Report is not ready", 409, "REPORT_NOT_READY");
@@ -48,8 +54,13 @@ const download = asyncHandler(async (req, res, next) => {
     throw new NotFoundError("Report not found");
   const file = path.join(exportDir, job.result.filename);
   try {
-    await fs.access(file);
+    const stat = await fs.stat(file);
+    if (Date.now() - stat.mtimeMs >= EXPORT_RETENTION_MS) {
+      await fs.rm(file, { force: true });
+      throw new NotFoundError("Report file has expired");
+    }
   } catch (e) {
+    if (e instanceof NotFoundError) throw e;
     if (e.code === "ENOENT") throw new NotFoundError("Report file not found");
     throw e;
   }

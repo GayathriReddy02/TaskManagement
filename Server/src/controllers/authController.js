@@ -2,6 +2,8 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const User = require("../models/User");
 const asyncHandler = require("../utils/asyncHandler");
+const DUMMY_PASSWORD_HASH =
+  "$2a$12$.f69dWbcY/d1t1s5RQCRbeMA7US6Bici76Ndh11h03T7DdPQej1Yy";
 
 function makeToken(user) {
   return jwt.sign({ sub: user.id }, process.env.JWT_SECRET, {
@@ -29,18 +31,24 @@ const register = asyncHandler(async (req, res) => {
       message: "Valid name, email, and password (8–72 chars) required",
     });
   }
-  if (await User.exists({ email: email.trim().toLowerCase() })) {
-    return res.status(409).json({ message: "Email already registered" });
-  }
   const hash = await bcrypt.hash(password, 12);
-  // Public registration can NEVER choose admin role.
-  const user = await User.create({
-    name: name.trim(),
-    email: email.trim().toLowerCase(),
-    password: hash,
-    role: "user",
+  const normalizedEmail = email.trim().toLowerCase();
+  try {
+    if (!(await User.exists({ email: normalizedEmail }))) {
+      // Public registration can NEVER choose admin role.
+      await User.create({
+        name: name.trim(),
+        email: normalizedEmail,
+        password: hash,
+        role: "user",
+      });
+    }
+  } catch (error) {
+    if (error.code !== 11000) throw error;
+  }
+  res.status(202).json({
+    message: "If the account can be created, you may now sign in.",
   });
-  res.status(201).json({ user: publicUser(user), token: makeToken(user) });
 });
 
 const login = asyncHandler(async (req, res) => {
@@ -51,15 +59,16 @@ const login = asyncHandler(async (req, res) => {
   const user = await User.findOne({ email: email.trim().toLowerCase() }).select(
     "+password",
   );
-  if (
-    !user ||
-    !user.isActive ||
-    !(await bcrypt.compare(password, user.password))
-  ) {
+  const passwordMatches = await bcrypt.compare(
+    password,
+    user?.password || DUMMY_PASSWORD_HASH,
+  );
+  if (!user || !user.isActive || !passwordMatches) {
     return res.status(401).json({ message: "Invalid credentials" });
   }
-  res.json({ user: publicUser(user), token: makeToken(user) });
+  res.json({ token: makeToken(user), user: publicUser(user) });
 });
 
 const me = (req, res) => res.json({ user: publicUser(req.user) });
-module.exports = { register, login, me };
+const logout = (req, res) => res.status(204).end();
+module.exports = { register, login, me, logout };

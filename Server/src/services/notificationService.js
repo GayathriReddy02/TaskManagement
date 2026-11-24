@@ -1,54 +1,73 @@
 const Notification = require("../models/Notification");
-const { emitter } = require("../events/taskEvents");
-
-const { queue } = require("../queues/jobQueue");
+const Task = require("../models/Task");
 class NotificationService {
-  constructor(model = Notification) {
+  constructor(model = Notification, taskModel = Task) {
     this.model = model;
+    this.taskModel = taskModel;
   }
-  async notify(userId, taskId, type, message, dedupeKey) {
+  async notify(userId, taskId, type, message, dedupeKey, session) {
     if (!userId) return;
-    try {
-      await this.model.create({ userId, taskId, type, message, dedupeKey });
-    } catch (err) {
-      if (err.code !== 11000) throw err; // concurrent duplicate / already notified
-    }
+    const create = async (activeSession) => {
+      if (taskId) {
+        const result = await this.taskModel.updateOne(
+          { _id: taskId },
+          { $inc: { notificationVersion: 1 } },
+          { session: activeSession, timestamps: false },
+        );
+        if (!result.matchedCount) return;
+      }
+      const existing = await this.model
+        .findOne({ userId, dedupeKey })
+        .session(activeSession)
+        .select("_id")
+        .lean();
+      if (existing) return;
+      await this.model.create(
+        [{ userId, taskId, type, message, dedupeKey }],
+        { session: activeSession },
+      );
+    };
+    if (session) return create(session);
+    return this.model.db.transaction(create);
   }
-  async handle(event, { task, actorId, eventId, details }) {
+  async handle(event, { taskId, title, priority, creatorId, assigneeId, actorId, eventId, details }, session) {
     if (event === "taskAssigned") {
-      if (task.assignedTo && String(task.assignedTo) !== String(actorId)) {
+      if (assigneeId && String(assigneeId) !== String(actorId)) {
         await this.notify(
-          task.assignedTo,
-          task._id,
+          assigneeId,
+          taskId,
           "assignment",
-          `Task assigned: ${task.title}`,
+          `Task assigned: ${title}`,
           `assignment:${eventId}`,
+          session,
         );
       }
     }
     if (event === "taskCompleted") {
       // Notify task creator when another user completed the task.
-      if (String(task.createdBy) !== String(actorId)) {
+      if (creatorId && String(creatorId) !== String(actorId)) {
         await this.notify(
-          task.createdBy,
-          task._id,
+          creatorId,
+          taskId,
           "completion",
-          `Task completed: ${task.title}`,
+          `Task completed: ${title}`,
           `completion:${eventId}`,
+          session,
         );
       }
     }
     if (event === "taskUpdated") {
       if (!details?.changedFields?.includes("priority")) return;
-      const recipients = [task.createdBy, task.assignedTo].filter(Boolean);
+      const recipients = [creatorId, assigneeId].filter(Boolean);
       for (const id of new Set(recipients.map(String))) {
         if (id !== String(actorId)) {
           await this.notify(
             id,
-            task._id,
+            taskId,
             "priorityChanged",
-            `Priority changed to ${task.priority}: ${task.title}`,
+            `Priority changed to ${priority}: ${title}`,
             `priority:${eventId}`,
+            session,
           );
         }
       }
@@ -56,15 +75,8 @@ class NotificationService {
   }
 }
 const notificationService = new NotificationService();
-function registerNotificationListeners() {
-  for (const event of ["taskAssigned", "taskCompleted", "taskUpdated"])
-    emitter.on(event, (payload) =>
-      queue.add("notification", { event, payload }, payload.actorId),
-    );
-}
 module.exports = {
   notify: notificationService.notify.bind(notificationService),
-  registerNotificationListeners,
   NotificationService,
   notificationService,
 };
