@@ -1,16 +1,16 @@
 # Task Management Backend — Milestones 1–3
 
-Stack: Node.js, Express, MongoDB/Mongoose, JWT, bcryptjs. No frontend.
+Stack: Node.js 20+, Express, MongoDB/Mongoose, bcrypt password hashing, JWT. No frontend.
 
 ## Run
 1. `npm install`
-2. Copy `.env.example` to `.env`, set a private `JWT_SECRET` of at least 32 characters, and start local MongoDB.
+2. Copy `.env.example` to `.env`, set a private `JWT_SECRET` of at least 32 characters, and start MongoDB. A standalone local server is supported.
 3. `npm run dev`
 4. Open http://localhost:5000/ .
 
 ## Routes
-- `POST /api/auth/register` JSON `{ "name":"Alex", "email":"alex@example.com", "password":"Password123" }`
-- `POST /api/auth/login` JSON `{ "email":"alex@example.com", "password":"Password123" }` -> bearer token and user
+- `POST /api/auth/register` JSON `{ "name":"Alex", "email":"alex@example.com", "password":"..." }` -> neutral response; stores a bcrypt hash
+- `POST /api/auth/login` JSON `{ "email":"alex@example.com", "password":"..." }` -> bearer token and user
 - `POST /api/auth/logout` -> ends the client session
 - `GET /api/auth/me` protected
 - `GET /api/users` admin-only active user directory
@@ -26,17 +26,17 @@ Stack: Node.js, Express, MongoDB/Mongoose, JWT, bcryptjs. No frontend.
 ## Permissions
 Registration always creates `user`; public request bodies cannot specify admin, createdBy, assignedTo, timestamps. Users see their own created/assigned tasks. Task owner/admin edits fields, deletes, assigns; assignee may update status. No public admin-creation API. For a real Admin user, provision one out-of-band via a trusted administrator workflow.
 
-To provision an administrator through the guarded utility, set `ADMIN_NAME`, `ADMIN_EMAIL`, and `ADMIN_PASSWORD` in the environment, then run `npm run provision-admin -- --confirm`. This operation creates or promotes the matching account and resets its password.
+To provision an administrator, first register an account with a password. Set `ADMIN_NAME` and `ADMIN_EMAIL`, then run `npm run provision-admin -- --confirm`. The utility only promotes an existing password account.
 
 ## Notes
 - Dates are treated as UTC calendar dates; date-range is inclusive of `toDate`.
 - `tags=a,b` matches at least one of the two tags.
 - Priority sorting maps High=3, Medium=2, Low=1.
-- Middleware validates bearer JWTs and reloads the active user from MongoDB. Existing bearer-token login remains in place; no cookie or CSRF token is required.
+- Middleware validates bearer JWTs and reloads the active user from MongoDB. Authentication uses email and password.
+- Passwords must contain at least 8 characters and no more than 72 UTF-8 bytes. They are visible in the browser's own Network DevTools payload. Use HTTPS in production; the backend hashes passwords with bcrypt before storage. Do not rely on client-side hashing to hide the request.
 - Task edits require the `If-Match` header from the task's `updatedAt`; stale edits return HTTP 409.
 - Deleting a task is owner/admin-only, removes notifications for all recipients, and preserves activity history.
-- Valid registration requests return the same neutral response and require a subsequent login.
-- Login and registration are limited to 10 requests per IP per 15 minutes. CORS allows `CLIENT_ORIGIN` (defaults to `http://localhost:4200`); set a comma-separated list for multiple frontend origins.
+- Authentication endpoints are limited to 10 requests per IP per 15 minutes. CORS allows `CLIENT_ORIGIN` (defaults to `http://localhost:4200`); set a comma-separated list for multiple frontend origins.
 
 ## Milestones 4–7 additions
 - `GET /api/activities` — recent activity (admin: all, users: events involving them at the time).
@@ -46,13 +46,13 @@ To provision an administrator through the guarded utility, set `ADMIN_NAME`, `AD
 - `GET /api/dashboard` — authorized task counts, byPriority, recent activity.
 - `REMINDER_INTERVAL_MINUTES` in `.env` controls periodic due-date checks; starts after MongoDB connection.
 - `node src/examples/promiseConcurrency.js` demonstrates all/allSettled/race/any.
-- Activity and notification jobs are stored in MongoDB in the same transaction as task writes. Workers may finish shortly after the HTTP response and recover expired job leases after a restart.
+- Activity and notification jobs are enqueued after task writes. These writes are not atomic: if enqueueing fails, a task change may already be saved without its related job. Workers may finish shortly after the HTTP response and recover expired job leases after a restart.
 - Overdue is **derived** from `dueDate < today UTC` for incomplete tasks. The existing status enum remains unchanged.
 - Due-soon reminder applies to tasks due tomorrow (UTC); overdue notifications are deduplicated.
 - Activity and notification records are added to MongoDB, but old tasks do not automatically produce historical activity records.
 
 ## Milestones 8–12 — additive upgrade
-This update uses the uploaded CommonJS backend as its baseline. Existing routes, task status/priority values, ownership checks, reminder scheduler and environment variable names are retained. The upload contained asynchronous event listeners but no tracked job queue, so milestone 8 was added as a prerequisite. Node 20+ recommended.
+This update uses the uploaded CommonJS backend as its baseline. Existing routes, task status/priority values, ownership checks, reminder scheduler and environment variable names are retained. The upload contained asynchronous event listeners but no tracked job queue, so milestone 8 was added as a prerequisite. Node 20+ is recommended.
 
 ### New APIs (bearer token required)
 - `POST /api/reports/json`, `/api/reports/csv`, `/api/reports/summary`: optional JSON body with `status`, `priority`, `search`, `tags`, `fromDate`, `toDate` (same semantics as task filters). Empty body `{}` exports all visible tasks, not just one page. Returns HTTP 202 and `{job: {id, status, ...}}`.
@@ -69,10 +69,10 @@ This update uses the uploaded CommonJS backend as its baseline. Existing routes,
 - Centralized error middleware handles malformed JSON, custom errors, Mongoose validation/cast errors, duplicate keys and common database connectivity errors. Existing response `message` is retained; centralized errors additionally include `success`, `code`, and `statusCode`. Some existing controller validation paths still return their original direct responses.
 
 ### Testing
-Run `npm test` for unit tests and HTTP tests. The MongoDB-backed transaction test in `tests/jobRetention.test.js` is skipped unless `MONGO_TEST_URI` points to a local `rs0` replica-set database named `task_management_it_<12 hex characters>`. It drops only that test database when finished. Example PowerShell:
+Run `npm test` for unit tests and HTTP tests. The optional MongoDB integration test in `tests/jobRetention.test.js` is skipped unless `MONGO_TEST_URI` points to a local standalone database named `task_management_it_<12 hex characters>`. It drops only that test database when finished. Example PowerShell:
 
 ```powershell
-$env:MONGO_TEST_URI = "mongodb://127.0.0.1:27018/task_management_it_a1b2c3d4e5f6?replicaSet=rs0"
+$env:MONGO_TEST_URI = "mongodb://127.0.0.1:27018/task_management_it_a1b2c3d4e5f6"
 npm.cmd test
 Remove-Item Env:\MONGO_TEST_URI
 ```
@@ -80,7 +80,7 @@ Remove-Item Env:\MONGO_TEST_URI
 Never point test data operations at a production database.
 
 ### Limitations
-Job records are durable in MongoDB, but quota and rate-limit counters remain process-local. Transactions require a replica set or transaction-capable sharded cluster. Historical report access is not automatically revoked when task permissions change. Terminal job metadata expires automatically and can be evicted sooner under capacity pressure; pending/processing/retrying jobs are never evicted. Export files are deleted after 24 hours. Use shared rate-limit/quota stores and access revocation for production. `.env` and `node_modules` are intentionally not distributed; copy `.env.example` and install dependencies with `npm ci`.
+Job records are durable in MongoDB, but task writes and their corresponding jobs/notifications are separate operations and are not atomic. A later write failure may leave earlier changes committed. Job capacity checks are serialized only within one backend process, and quota/rate-limit counters are process-local. Historical report access is not automatically revoked when task permissions change. Terminal job metadata expires automatically and can be evicted sooner under capacity pressure; pending/processing/retrying jobs are never evicted. Export files are deleted after 24 hours. Use shared rate-limit/quota stores and access revocation for production. `.env` and `node_modules` are intentionally not distributed; copy `.env.example` and install dependencies with `npm ci`.
 
 ### Job retention settings
 Optional variables in your existing local `.env` (positive integers):

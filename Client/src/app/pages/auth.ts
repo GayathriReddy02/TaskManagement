@@ -5,6 +5,7 @@ import { ButtonModule } from "primeng/button";
 import { InputTextModule } from "primeng/inputtext";
 import { PasswordModule } from "primeng/password";
 import { Api, Auth, errorText } from "../core/api";
+
 @Component({
   standalone: true,
   imports: [
@@ -35,51 +36,57 @@ import { Api, Auth, errorText } from "../core/api";
           <div class="muted" role="status">{{ registeredMessage }}</div>
         } @else {
           <form (ngSubmit)="submit()" #form="ngForm">
-          @if (register) {
+            @if (register) {
+              <label
+                >Full name<input
+                  pInputText
+                  name="name"
+                  [(ngModel)]="name"
+                  required
+                  maxlength="80"
+                  autocomplete="name"
+              /></label>
+            }
             <label
-              >Full name<input
+              >Email address<input
                 pInputText
-                name="name"
-                [(ngModel)]="name"
+                name="email"
+                type="email"
+                [(ngModel)]="email"
                 required
-                maxlength="80"
-                autocomplete="name"
+                email
+                autocomplete="email"
             /></label>
-          }
-          <label
-            >Email address<input
-              pInputText
-              name="email"
-              type="email"
-              [(ngModel)]="email"
-              required
-              email
-              autocomplete="email" /></label
-          ><label
-            >Password<p-password
-              name="password"
-              [(ngModel)]="password"
-              [toggleMask]="true"
-              [feedback]="false"
-              [required]="true"
-              [inputStyle]="{ width: '100%' }"
-              [style]="{ width: '100%' }"
-          /></label>
-          @if (register) {
-            <small>Use 8–72 characters. New accounts are regular users.</small>
-          }
-          @if (error) {
-            <div class="error" role="alert">{{ error }}</div>
-          }
-          <p-button
-            type="submit"
-            [label]="register ? 'Create account' : 'Sign in'"
-            icon="pi pi-arrow-right"
-            iconPos="right"
-            [loading]="busy"
-            [disabled]="form.invalid || busy"
-            styleClass="wide"
-          />
+            <label
+              >Password<p-password
+                name="password"
+                [(ngModel)]="password"
+                [toggleMask]="true"
+                [feedback]="register"
+                [required]="true"
+                [minlength]="register ? 8 : 1"
+                maxlength="72"
+                [inputStyle]="{ width: '100%' }"
+                [style]="{ width: '100%' }"
+            /></label>
+            @if (register) {
+              <small>
+                Use at least 8 characters and no more than 72 UTF-8 bytes. New
+                accounts are regular users.
+              </small>
+            }
+            @if (error) {
+              <div class="error" role="alert">{{ error }}</div>
+            }
+            <p-button
+              type="submit"
+              [label]="register ? 'Create account' : 'Sign in'"
+              icon="pi pi-arrow-right"
+              iconPos="right"
+              [loading]="busy"
+              [disabled]="form.invalid || busy"
+              styleClass="wide"
+            />
           </form>
         }
         <p class="muted">
@@ -116,26 +123,18 @@ export class AuthPage {
   busy = false;
   error = "";
   registeredMessage = "";
+
   async submit() {
     if (this.busy) return;
     this.error = "";
-    if (
-      this.register &&
-      (!this.name.trim() ||
-        this.password.length < 8 ||
-        this.password.length > 72)
-    ) {
-      this.error = "Enter a valid name and password of 8–72 characters.";
-      return;
-    }
     this.busy = true;
     try {
       if (this.register) {
         const response = await this.api.register(
-              this.name.trim(),
-              this.email.trim(),
-              this.password,
-            );
+          this.name.trim(),
+          this.email.trim(),
+          this.password,
+        );
         this.registeredMessage = response.message;
       } else {
         const response = await this.api.login(
@@ -145,10 +144,11 @@ export class AuthPage {
         localStorage.setItem("token", response.token);
         await this.auth.accept(response.user);
       }
-    } catch (e) {
-      this.error = errorText(e);
+    } catch (error) {
+      this.error = errorText(error);
     } finally {
       this.busy = false;
     }
   }
+
 }

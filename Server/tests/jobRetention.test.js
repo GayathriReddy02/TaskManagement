@@ -16,9 +16,7 @@ function fakePersistence() {
     return true;
   };
   const model = {
-    db: { transaction: callback => callback(null) },
     countDocuments: filter => ({
-      session: async () => [...rows.values()].filter(job => matches(job, filter)).length,
       then: (resolve, reject) => Promise.resolve([...rows.values()].filter(job => matches(job, filter)).length).then(resolve, reject),
     }),
     insertMany: async records => {
@@ -31,7 +29,6 @@ function fakePersistence() {
         sort() { found.sort((a, b) => a.finishedAt - b.finishedAt); return query; },
         limit(count) { found = found.slice(0, count); return query; },
         select() { return query; },
-        session() { return query; },
         lean: async () => found.map(job => ({ ...job })),
       };
       return query;
@@ -58,7 +55,6 @@ function fakePersistence() {
       return { ...job };
     },
     updateOne: async (filter, update) => {
-      if (filter._id === "capacity") return { modifiedCount: 1 };
       const job = rows.get(filter._id);
       if (!job || job.status !== filter.status || job.leaseId !== filter.leaseId)
         return { modifiedCount: 0 };
@@ -70,7 +66,7 @@ function fakePersistence() {
     createCollection: async () => {},
     createIndexes: async () => {},
   };
-  return { model, rows, stateModel: { updateOne: async () => ({}) } };
+  return { model, rows };
 }
 
 function makeQueue(options = {}) {
@@ -111,6 +107,17 @@ test("capacity includes active jobs and reclaims finished internal jobs first", 
   const active = await queue.add("report", {}, "u");
   await assert.rejects(queue.add("report", {}, "u"), { statusCode: 503 });
   assert.ok(await queue.get(active.id));
+});
+
+test("concurrent enqueue requests stay within capacity in one process", async () => {
+  const { queue, persistence } = makeQueue({ capacity: 1 });
+  const results = await Promise.allSettled([
+    queue.add("report", {}, "u"),
+    queue.add("report", {}, "u"),
+  ]);
+  assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
+  assert.equal(results.filter(result => result.status === "rejected").length, 1);
+  assert.equal(persistence.rows.size, 1);
 });
 
 test("claims are exclusive and expired processing leases can be recovered", async () => {
@@ -161,13 +168,10 @@ test("event payload contains event-time facts without the task document", () => 
   });
 });
 
-test("create, status, and assignment mutations write matching outbox jobs transactionally", async t => {
-  const mongoose = require("mongoose");
+test("create, status, and assignment mutations enqueue matching outbox jobs", async t => {
   const { queue } = require("../src/queues/jobQueue");
   const { taskService } = require("../src/services/taskService");
   const { createTask, updateStatus, assign } = require("../src/controllers/taskController");
-  const session = { marker: "transaction" };
-  t.mock.method(mongoose.connection, "transaction", async work => work(session));
   const enqueued = [];
   t.mock.method(queue, "enqueueMany", async (jobs, options) => {
     enqueued.push({ jobs, options });
@@ -186,7 +190,7 @@ test("create, status, and assignment mutations write matching outbox jobs transa
   );
   assert.equal(response.task, created);
   assert.deepEqual(enqueued[0].jobs.map(job => job.type), ["activity"]);
-  assert.equal(enqueued[0].options.session, session);
+  assert.equal(enqueued[0].options, undefined);
 
   const task = {
     _id: "0123456789abcdef01234567", title: "Existing", priority: "High",
@@ -201,7 +205,7 @@ test("create, status, and assignment mutations write matching outbox jobs transa
   );
   assert.deepEqual(enqueued[1].jobs.map(job => job.type), ["activity", "notification"]);
   assert.equal(enqueued[1].jobs[0].payload.event, "taskCompleted");
-  assert.equal(enqueued[1].options.session, session);
+  assert.equal(enqueued[1].options, undefined);
 
   t.mock.method(taskService, "assign", async current => {
     current.assignedTo = "new";
@@ -214,32 +218,27 @@ test("create, status, and assignment mutations write matching outbox jobs transa
   );
   assert.deepEqual(enqueued[2].jobs.map(job => job.type), ["activity", "notification"]);
   assert.equal(enqueued[2].jobs[0].payload.event, "taskAssigned");
-  assert.equal(enqueued[2].options.session, session);
+  assert.equal(enqueued[2].options, undefined);
 });
 
-test("MongoDB transactionally stores task outbox jobs and recovers them after restart", {
+test("standalone MongoDB stores task outbox jobs and recovers them after restart", {
   skip: !mongoTestUri,
 }, async () => {
   const mongoose = require("mongoose");
   const Task = require("../src/models/Task");
   const Job = require("../src/models/Job");
-  const QueueState = require("../src/models/QueueState");
   const url = new URL(mongoTestUri);
   const database = url.pathname.slice(1);
   assert.equal(url.protocol, "mongodb:");
   assert.ok(["localhost", "127.0.0.1", "::1"].includes(url.hostname.replace(/^\[|\]$/g, "")));
   assert.equal(url.host.includes(","), false);
   assert.match(database, /^task_management_it_[a-f0-9]{12}$/i);
-  assert.deepEqual(url.searchParams.getAll("replicaSet"), ["rs0"]);
+  assert.equal(url.searchParams.has("replicaSet"), false);
 
   await mongoose.connect(mongoTestUri);
   try {
-    const hello = await mongoose.connection.db.admin().command({ hello: 1 });
-    assert.equal(hello.setName, "rs0");
-
     const queue = new JobQueue({
       model: Job,
-      stateModel: QueueState,
       capacity: 10,
       completedMs: 60_000,
       failedMs: 60_000,
@@ -250,9 +249,9 @@ test("MongoDB transactionally stores task outbox jobs and recovers them after re
     const ownerId = new mongoose.Types.ObjectId();
     const taskId = new mongoose.Types.ObjectId();
     let now = Date.now();
+    await Task.create({ _id: taskId, title: "Integration task", createdBy: ownerId });
     const persistedQueue = new JobQueue({
       model: Job,
-      stateModel: QueueState,
       capacity: 10,
       completedMs: 60_000,
       failedMs: 60_000,
@@ -261,53 +260,19 @@ test("MongoDB transactionally stores task outbox jobs and recovers them after re
       now: () => now,
     });
 
-    const [activityJob] = await mongoose.connection.transaction(async session => {
-      await Task.create(
-        [{ _id: taskId, title: "Integration task", createdBy: ownerId }],
-        { session },
-      );
-      return queue.enqueueMany(
-        [{
-          type: "activity",
-          ownerId,
-          payload: { event: "taskCreated", payload: { taskId: String(taskId) } },
-        }],
-        { session },
-      );
-    });
+    const [activityJob] = await queue.enqueueMany([{
+      type: "activity",
+      ownerId,
+      payload: { event: "taskCreated", payload: { taskId: String(taskId) } },
+    }]);
     assert.equal(await Task.countDocuments({ _id: taskId }), 1);
     assert.equal(await Job.countDocuments({ _id: activityJob._id }), 1);
-
-    const rolledBackTaskId = new mongoose.Types.ObjectId();
-    let rolledBackJobId;
-    await assert.rejects(
-      mongoose.connection.transaction(async session => {
-        await Task.create(
-          [{ _id: rolledBackTaskId, title: "Rollback task", createdBy: ownerId }],
-          { session },
-        );
-        const [job] = await queue.enqueueMany(
-          [{
-            type: "activity",
-            ownerId,
-            payload: { taskId: String(rolledBackTaskId) },
-          }],
-          { session },
-        );
-        rolledBackJobId = job._id;
-        throw new Error("force transaction rollback");
-      }),
-      /force transaction rollback/,
-    );
-    assert.equal(await Task.countDocuments({ _id: rolledBackTaskId }), 0);
-    assert.equal(await Job.countDocuments({ _id: rolledBackJobId }), 0);
 
     const firstClaim = await persistedQueue.claim();
     assert.equal(firstClaim.id, activityJob._id);
     now += 101;
     const recoveredClaim = await new JobQueue({
       model: Job,
-      stateModel: QueueState,
       leaseMs: 100,
       now: () => now,
     }).claim();

@@ -1,7 +1,6 @@
 const { randomUUID } = require("node:crypto");
 const { EventEmitter } = require("node:events");
 const Job = require("../models/Job");
-const QueueState = require("../models/QueueState");
 const { QueueError } = require("../errors/AppError");
 
 function positiveInteger(value, name, max = Number.MAX_SAFE_INTEGER) {
@@ -31,7 +30,6 @@ class JobQueue extends EventEmitter {
     leaseMs = setting("JOB_PROCESSING_LEASE_MS", 300000),
     now = Date.now,
     model = Job,
-    stateModel = QueueState,
   } = {}) {
     super();
     positiveInteger(capacity, "JOB_CAPACITY");
@@ -39,55 +37,43 @@ class JobQueue extends EventEmitter {
     positiveInteger(failedMs, "JOB_FAILED_RETENTION_MS");
     positiveInteger(cleanupMs, "JOB_CLEANUP_INTERVAL_MS", 2147483647);
     positiveInteger(leaseMs, "JOB_PROCESSING_LEASE_MS", 2147483647);
-    Object.assign(this, { capacity, completedMs, failedMs, cleanupMs, leaseMs, now, model, stateModel });
+    Object.assign(this, { capacity, completedMs, failedMs, cleanupMs, leaseMs, now, model });
+    this.enqueueTail = Promise.resolve();
   }
 
   async initialize() {
-    await this.stateModel.updateOne(
-      { _id: "capacity" },
-      { $setOnInsert: { generation: 0 } },
-      { upsert: true },
-    );
     await this.model.createCollection().catch(error => {
       if (error.codeName !== "NamespaceExists") throw error;
     });
     await this.model.createIndexes();
   }
 
-  async cleanup(session) {
+  async cleanup() {
     const now = new Date(this.now());
     const completedCutoff = new Date(now.getTime() - this.completedMs);
     const failedCutoff = new Date(now.getTime() - this.failedMs);
-    const options = session ? { session } : {};
     const result = await this.model.deleteMany(
       { $or: [
         { status: "completed", finishedAt: { $lte: completedCutoff } },
         { status: "failed", finishedAt: { $lte: failedCutoff } },
       ] },
-      options,
     );
     return result.deletedCount || 0;
   }
 
-  async reserveCapacity(count, session) {
+  async reserveCapacity(count) {
     positiveInteger(count, "reservation size");
-    // The singleton write serializes capacity checks in concurrent transactions.
-    await this.stateModel.updateOne(
-      { _id: "capacity" },
-      { $inc: { generation: 1 } },
-      { upsert: true, session },
-    );
-    await this.cleanup(session);
-    let total = await this.model.countDocuments({}).session(session);
+    await this.cleanup();
+    let total = await this.model.countDocuments({});
     const needed = total + count - this.capacity;
     if (needed > 0) {
       const internal = await this.model.find({
         type: { $in: ["activity", "notification"] },
         status: { $in: ["completed", "failed"] },
         finishedAt: { $ne: null },
-      }).sort({ finishedAt: 1 }).limit(needed).select("_id").session(session).lean();
+      }).sort({ finishedAt: 1 }).limit(needed).select("_id").lean();
       if (internal.length) {
-        await this.model.deleteMany({ _id: { $in: internal.map(job => job._id) } }, { session });
+        await this.model.deleteMany({ _id: { $in: internal.map(job => job._id) } });
         total -= internal.length;
       }
     }
@@ -96,9 +82,9 @@ class JobQueue extends EventEmitter {
         type: { $in: ["report", "export"] },
         status: { $in: ["completed", "failed"] },
         finishedAt: { $ne: null },
-      }).sort({ finishedAt: 1 }).limit(total + count - this.capacity).select("_id").session(session).lean();
+      }).sort({ finishedAt: 1 }).limit(total + count - this.capacity).select("_id").lean();
       if (reclaim.length) {
-        await this.model.deleteMany({ _id: { $in: reclaim.map(job => job._id) } }, { session });
+        await this.model.deleteMany({ _id: { $in: reclaim.map(job => job._id) } });
         total -= reclaim.length;
       }
     }
@@ -106,10 +92,16 @@ class JobQueue extends EventEmitter {
       throw new QueueError("Job queue capacity reached; try again later");
   }
 
-  async enqueueMany(inputs, { session } = {}) {
+  async enqueueMany(inputs) {
     if (!Array.isArray(inputs) || inputs.length === 0) return [];
-    const insert = async activeSession => {
-      await this.reserveCapacity(inputs.length, activeSession);
+    let release;
+    const previous = this.enqueueTail;
+    this.enqueueTail = new Promise(resolve => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      await this.reserveCapacity(inputs.length);
       const createdAt = new Date(this.now());
       const records = inputs.map(({ type, payload, ownerId }) => ({
         _id: randomUUID(),
@@ -123,14 +115,12 @@ class JobQueue extends EventEmitter {
         createdAt,
         result: null,
       }));
-      const jobs = await this.model.insertMany(records, { session: activeSession });
+      const jobs = await this.model.insertMany(records);
+      this.emit("ready");
       return jobs;
-    };
-    const jobs = session
-      ? await insert(session)
-      : await this.model.db.transaction(insert);
-    if (!session) this.emit("ready");
-    return jobs;
+    } finally {
+      release();
+    }
   }
 
   async add(type, payload, ownerId) {

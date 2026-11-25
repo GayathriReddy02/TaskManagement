@@ -1,16 +1,16 @@
 # Task Management Backend — Milestones 1–3
 
-Stack: Node.js, Express, MongoDB/Mongoose, JWT, bcryptjs. No frontend.
+Stack: Node.js 20+, Express, MongoDB/Mongoose, bcrypt password hashing, JWT.
 
 ## Run
 1. `npm install`
-2. Copy `Server/.env.example` to `Server/.env`, set a private `JWT_SECRET` of at least 32 characters, and start MongoDB as a replica set (required for transactions).
+2. Copy `Server/.env.example` to `Server/.env`, set a private `JWT_SECRET` of at least 32 characters, and start MongoDB. A standalone local server is supported.
 3. `npm run dev`
 4. Open http://localhost:5000/ .
 
 ## Routes
-- `POST /api/auth/register` JSON `{ "name":"Alex", "email":"alex@example.com", "password":"Password123" }`
-- `POST /api/auth/login` JSON `{ "email":"alex@example.com", "password":"Password123" }` -> bearer token and user
+- `POST /api/auth/register` JSON `{ "name":"Alex", "email":"alex@example.com", "password":"..." }` -> neutral response; password stored as a bcrypt hash
+- `POST /api/auth/login` JSON `{ "email":"alex@example.com", "password":"..." }` -> bearer token and user
 - `POST /api/auth/logout` -> ends the client session
 - `GET /api/auth/me` protected
 - `GET /api/users` admin-only active user directory
@@ -44,7 +44,7 @@ Registration always creates `user`; public request bodies cannot specify admin, 
 - `GET /api/dashboard` — authorized task counts, byPriority, recent activity.
 - `REMINDER_INTERVAL_MINUTES` in `.env` controls periodic due-date checks; starts after MongoDB connection.
 - `node src/examples/promiseConcurrency.js` demonstrates all/allSettled/race/any.
-- Activity and notification jobs are stored in MongoDB in the same transaction as task creation, updates, status changes, and assignments. Workers may finish shortly after the HTTP response.
+- Activity and notification jobs are enqueued after task writes. These writes are not atomic: if enqueueing fails, a task change may already be saved without its related job.
 - Overdue is **derived** from `dueDate < today UTC` for incomplete tasks. The existing status enum remains unchanged.
 - Due-soon reminder applies to tasks due tomorrow (UTC); overdue notifications are deduplicated.
 - Activity and notification records are added to MongoDB, but old tasks do not automatically produce historical activity records.
@@ -67,10 +67,10 @@ This update uses the uploaded CommonJS backend as its baseline. Existing routes,
 - Centralized error middleware handles malformed JSON, custom errors, Mongoose validation/cast errors, duplicate keys and common database connectivity errors. Existing response `message` is retained; centralized errors additionally include `success`, `code`, and `statusCode`. Some existing controller validation paths still return their original direct responses.
 
 ### Testing
-Run `npm test` for unit tests and HTTP integration tests that do not require MongoDB. `tests/jobRetention.test.js` covers retention, capacity, exclusive claims, stale lease recovery, retries and terminal result cleanup using a persistence test double. Full authenticated CRUD, transaction rollback, report generation against MongoDB, and download integration remain to be tested with an isolated replica-set test database. Never point test data operations at a production database.
+Run `npm test` for unit tests and HTTP integration tests that do not require MongoDB. `tests/jobRetention.test.js` covers retention, capacity, exclusive claims, stale lease recovery, retries and terminal result cleanup using a persistence test double. Its optional MongoDB integration test uses a local standalone test database named `task_management_it_<12 hex characters>` and drops only that database. Never point test data operations at a production database.
 
 ### Limitations
-MongoDB must run as a replica set (or transaction-capable sharded cluster) because task writes and their outbox jobs commit atomically. A standalone MongoDB server will reject task writes that require transactions. For a local single-node replica set, initialize MongoDB with a replica-set name and include the matching `replicaSet` parameter in `MONGO_URI` (the example uses `rs0`). Report quota counters and rate-limit counters remain process-local. Historical report access is not automatically revoked when task permissions change. Terminal job records expire automatically and can be evicted sooner under capacity pressure; pending/processing/retrying jobs are never evicted. Export files are deleted after 24 hours. `.env` and `node_modules` are intentionally not distributed; copy `.env.example` and install dependencies with `npm ci`.
+MongoDB may run as a standalone server. Task writes and their related job/notification writes are separate operations, so a later failure does not roll back an earlier write. Job capacity checks are serialized within one backend process, not across multiple backend instances. Report quota counters and rate-limit counters remain process-local. Historical report access is not automatically revoked when task permissions change. Terminal job records expire automatically and can be evicted sooner under capacity pressure; pending/processing/retrying jobs are never evicted. Export files are deleted after 24 hours. `.env` and `node_modules` are intentionally not distributed; copy `.env.example` and install dependencies with `npm ci`.
 
 ### Job retention settings
 Optional variables in your existing local `.env` (positive integers):

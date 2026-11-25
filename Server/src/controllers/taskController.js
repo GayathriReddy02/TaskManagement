@@ -5,7 +5,6 @@ const {
   AppError,
 } = require("../errors/AppError");
 const asyncHandler = require("../utils/asyncHandler");
-const mongoose = require("mongoose");
 const { randomUUID } = require("node:crypto");
 const { queue } = require("../queues/jobQueue");
 const { compactEvent } = require("../events/eventPayload");
@@ -20,12 +19,6 @@ const {
   normalizeTask,
   validateListParams,
 } = require("../services/taskService");
-
-async function transaction(work) {
-  let result;
-  await mongoose.connection.transaction(async session => { result = await work(session); });
-  return result;
-}
 
 function eventJobs(event, task, actorId, details = {}) {
   const payload = compactEvent({ task, actorId, eventId: randomUUID(), details });
@@ -67,15 +60,11 @@ async function addTaskPeople(tasks) {
 const createTask = asyncHandler(async (req, res) => {
   const error = validateTask(req.body, true);
   if (error) throw new ValidationError(error);
-  const task = await transaction(async session => {
-    const created = await taskService.create({
-      ...normalizeTask(req.body),
-      createdBy: req.user._id,
-    }, session);
-    await queue.enqueueMany(eventJobs("taskCreated", created, req.user._id), { session });
-    return created;
+  const task = await taskService.create({
+    ...normalizeTask(req.body),
+    createdBy: req.user._id,
   });
-  queue.emit("ready");
+  await queue.enqueueMany(eventJobs("taskCreated", task, req.user._id));
   res.status(201).json({ task });
 });
 
@@ -133,33 +122,26 @@ const updateTask = asyncHandler(async (req, res) => {
       JSON.stringify(comparisonValue(key, changes[key])),
   );
   if (!changedFields.length) return res.json({ task });
-  const updatedTask = await transaction(async session => {
-    const updated = await taskService.updateIfUnchanged(
-      task._id,
-      task.updatedAt,
-      changes,
-      session,
+  const updatedTask = await taskService.updateIfUnchanged(
+    task._id,
+    task.updatedAt,
+    changes,
+  );
+  if (!updatedTask)
+    throw new AppError(
+      "Task changed since it was loaded. Reload it before saving.",
+      409,
+      "STALE_TASK",
     );
-    if (!updated)
-      throw new AppError(
-        "Task changed since it was loaded. Reload it before saving.",
-        409,
-        "STALE_TASK",
-      );
-    const completesTask = previousStatus !== updated.status && updated.status === "Completed";
-    if (changedFields.length) {
-      const event = completesTask ? "taskCompleted" : "taskUpdated";
-      const payload = compactEvent({
-        task: updated, actorId: req.user._id, eventId: randomUUID(),
-        details: { changedFields, previousPriority, ...(completesTask ? { previousStatus } : {}) },
-      });
-      const jobs = [{ type: "activity", payload: { event, payload }, ownerId: req.user._id }];
-      if (event !== "taskCreated") jobs.push({ type: "notification", payload: { event, payload }, ownerId: req.user._id });
-      await queue.enqueueMany(jobs, { session });
-    }
-    return updated;
+  const completesTask = previousStatus !== updatedTask.status && updatedTask.status === "Completed";
+  const event = completesTask ? "taskCompleted" : "taskUpdated";
+  const payload = compactEvent({
+    task: updatedTask, actorId: req.user._id, eventId: randomUUID(),
+    details: { changedFields, previousPriority, ...(completesTask ? { previousStatus } : {}) },
   });
-  if (changedFields.length) queue.emit("ready");
+  const jobs = [{ type: "activity", payload: { event, payload }, ownerId: req.user._id }];
+  if (event !== "taskCreated") jobs.push({ type: "notification", payload: { event, payload }, ownerId: req.user._id });
+  await queue.enqueueMany(jobs);
   res.json({ task: updatedTask });
 });
 
@@ -173,21 +155,18 @@ const updateStatus = asyncHandler(async (req, res) => {
     throw new NotFoundError("Task not found");
   const previousStatus = task.status;
   task.status = req.body.status;
-  await transaction(async session => {
-    await taskService.save(task, session);
-    if (previousStatus !== task.status) {
-      const event = task.status === "Completed" ? "taskCompleted" : "taskUpdated";
-      const payload = compactEvent({
-        task, actorId: req.user._id, eventId: randomUUID(),
-        details: { changedFields: ["status"], previousStatus },
-      });
-      await queue.enqueueMany([
-        { type: "activity", payload: { event, payload }, ownerId: req.user._id },
-        { type: "notification", payload: { event, payload }, ownerId: req.user._id },
-      ], { session });
-    }
-  });
-  if (previousStatus !== task.status) queue.emit("ready");
+  await taskService.save(task);
+  if (previousStatus !== task.status) {
+    const event = task.status === "Completed" ? "taskCompleted" : "taskUpdated";
+    const payload = compactEvent({
+      task, actorId: req.user._id, eventId: randomUUID(),
+      details: { changedFields: ["status"], previousStatus },
+    });
+    await queue.enqueueMany([
+      { type: "activity", payload: { event, payload }, ownerId: req.user._id },
+      { type: "notification", payload: { event, payload }, ownerId: req.user._id },
+    ]);
+  }
   res.json({ task });
 });
 
@@ -198,10 +177,8 @@ const deleteTask = asyncHandler(async (req, res) => {
     throw new NotFoundError("Task not found");
   if (!isOwnerOrAdmin(task, req.user))
     throw new ForbiddenError("Only owner or admin can delete task");
-  await transaction(async session => {
-    await taskService.remove(task, session);
-    await Notification.deleteMany({ taskId: task._id }, { session });
-  });
+  await taskService.remove(task);
+  await Notification.deleteMany({ taskId: task._id });
   res.json({ message: "Task deleted" });
 });
 
@@ -216,21 +193,17 @@ const assign = asyncHandler(async (req, res) => {
   if (!isOwnerOrAdmin(task, req.user))
     throw new ForbiddenError("Only owner or admin can assign task");
   const previousAssignee = task.assignedTo;
-  const result = await transaction(async session => {
-    const assigned = await taskService.assign(task, req.body.assignedTo, () => {}, session);
-    if (!assigned.error && String(previousAssignee || "") !== String(assigned.task.assignedTo || "")) {
-      const event = "taskAssigned";
-      const payload = compactEvent({ task: assigned.task, actorId: req.user._id, eventId: randomUUID(), details: { previousAssignee } });
-      await queue.enqueueMany([
-        { type: "activity", payload: { event, payload }, ownerId: req.user._id },
-        { type: "notification", payload: { event, payload }, ownerId: req.user._id },
-      ], { session });
-    }
-    return assigned;
-  });
+  const result = await taskService.assign(task, req.body.assignedTo, () => {});
   if (result.error)
     throw new AppError(result.error, result.code, result.code === 404 ? "NOT_FOUND" : "VALIDATION_ERROR");
-  if (String(previousAssignee || "") !== String(result.task.assignedTo || "")) queue.emit("ready");
+  if (String(previousAssignee || "") !== String(result.task.assignedTo || "")) {
+    const event = "taskAssigned";
+    const payload = compactEvent({ task: result.task, actorId: req.user._id, eventId: randomUUID(), details: { previousAssignee } });
+    await queue.enqueueMany([
+      { type: "activity", payload: { event, payload }, ownerId: req.user._id },
+      { type: "notification", payload: { event, payload }, ownerId: req.user._id },
+    ]);
+  }
   res.json({ task: result.task });
 });
 

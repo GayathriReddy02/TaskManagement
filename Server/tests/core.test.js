@@ -9,11 +9,26 @@ test('permanent failure stops at four total attempts',async()=>{let attempts=0;a
 test('nonretryable failure is not repeated',async()=>{let attempts=0;await assert.rejects(retry(()=>{attempts++;throw new QueueError('invalid');},3,0),/invalid/);assert.equal(attempts,1);});
 test('CSV quoting and spreadsheet formula protection',()=>{assert.equal(csvCell('a,"b"'),'"a,""b"""');assert.equal(csvCell('=1+1'),'"\'=1+1"');assert.equal(csvCell(null),'""');});
 test('custom errors retain status and code',()=>{const e=new ValidationError('bad input');assert.equal(e.statusCode,400);assert.equal(e.code,'VALIDATION_ERROR');});
+test('report matching treats missing filters as all visible tasks', () => {
+  const mongoose = require('mongoose');
+  const { buildTaskMatch } = require('../src/services/taskService');
+  const userId = '0123456789abcdef01234567';
+  const objectId = new mongoose.Types.ObjectId(userId);
+  const match = buildTaskMatch({ _id: userId, role: 'user' });
+
+  assert.deepEqual(match, {
+    $and: [{
+      $or: [
+        { createdBy: objectId },
+        { assignedTo: objectId },
+      ],
+    }],
+  });
+});
 test('unchanged due date is not reported as a task change', async (t) => {
   const { updateTask } = require('../src/controllers/taskController');
   const { taskService } = require('../src/services/taskService');
   const { queue } = require('../src/queues/jobQueue');
-  const mongoose = require('mongoose');
   const id = '0123456789abcdef01234567';
   const task = {
     _id: id,
@@ -26,8 +41,6 @@ test('unchanged due date is not reported as a task change', async (t) => {
   };
   t.mock.method(taskService, 'findById', async () => task);
   t.mock.method(taskService, 'updateIfUnchanged', async () => task);
-  const session = { withTransaction: async work => work(session), endSession: async () => {} };
-  t.mock.method(mongoose.connection, 'transaction', async work => work(session));
   const enqueue = t.mock.method(queue, 'enqueueMany', async () => []);
   let response;
   let error;
@@ -111,15 +124,13 @@ test('dashboard counts each task tag once and returns the ten most-used tags', a
 test('notification writes stop when their task has already been deleted', async () => {
   const { NotificationService } = require('../src/services/notificationService');
   let notificationLookups = 0;
-  const session = {};
   const notifications = {
-    db: { transaction: (work) => work(session) },
-    findOne() {
+    updateOne() {
       notificationLookups++;
       throw new Error('No notification should be created for a deleted task');
     },
   };
-  const tasks = { updateOne: async () => ({ matchedCount: 0 }) };
+  const tasks = { exists: async () => false };
   const service = new NotificationService(notifications, tasks);
 
   await service.notify('recipient', 'deleted-task', 'assignment', 'message', 'key');
@@ -127,49 +138,45 @@ test('notification writes stop when their task has already been deleted', async 
   assert.equal(notificationLookups, 0);
 });
 
-test('notification creation locks the task and inserts in one transaction', async () => {
+test('notification creation uses a deduplicated upsert on standalone MongoDB', async () => {
   const { NotificationService } = require('../src/services/notificationService');
-  const session = {};
-  let taskWrite;
   let notificationWrite;
   const notifications = {
-    db: { transaction: (work) => work(session) },
-    findOne: (filter) => ({
-      session(actualSession) {
-        assert.equal(actualSession, session);
-        assert.deepEqual(filter, { userId: 'recipient', dedupeKey: 'key' });
-        return this;
-      },
-      select: () => ({
-        lean: async () => null,
-      }),
-    }),
-    create: async (documents, options) => {
-      notificationWrite = { documents, options };
-    },
-  };
-  const tasks = {
     updateOne: async (filter, update, options) => {
-      taskWrite = { filter, update, options };
-      return { matchedCount: 1 };
+      notificationWrite = { filter, update, options };
     },
   };
+  const tasks = { exists: async () => true };
   const service = new NotificationService(notifications, tasks);
 
   await service.notify('recipient', 'task-id', 'assignment', 'message', 'key');
 
-  assert.deepEqual(taskWrite.filter, { _id: 'task-id' });
-  assert.deepEqual(taskWrite.update, { $inc: { notificationVersion: 1 } });
-  assert.equal(taskWrite.options.session, session);
-  assert.equal(taskWrite.options.timestamps, false);
-  assert.deepEqual(notificationWrite.documents, [{
-    userId: 'recipient',
-    taskId: 'task-id',
-    type: 'assignment',
-    message: 'message',
-    dedupeKey: 'key',
-  }]);
-  assert.equal(notificationWrite.options.session, session);
+  assert.deepEqual(notificationWrite.filter, { userId: 'recipient', dedupeKey: 'key' });
+  assert.deepEqual(notificationWrite.update, {
+    $setOnInsert: {
+      userId: 'recipient',
+      taskId: 'task-id',
+      type: 'assignment',
+      message: 'message',
+      dedupeKey: 'key',
+    },
+  });
+  assert.deepEqual(notificationWrite.options, { upsert: true });
+});
+
+test('notification upsert treats a concurrent duplicate as already delivered', async () => {
+  const { NotificationService } = require('../src/services/notificationService');
+  const notifications = {
+    updateOne: async () => {
+      throw Object.assign(new Error('duplicate key'), { code: 11000 });
+    },
+  };
+  const tasks = { exists: async () => true };
+  const service = new NotificationService(notifications, tasks);
+
+  await assert.doesNotReject(
+    service.notify('recipient', 'task-id', 'assignment', 'message', 'key'),
+  );
 });
 
 test('notification lock field is hidden from task responses', () => {

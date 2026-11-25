@@ -1,6 +1,5 @@
 require("dotenv").config();
 
-const bcrypt = require("bcryptjs");
 const mongoose = require("mongoose");
 const User = require("../src/models/User");
 
@@ -12,30 +11,27 @@ async function main() {
 
   const name = process.env.ADMIN_NAME?.trim();
   const email = process.env.ADMIN_EMAIL?.trim().toLowerCase();
-  const password = process.env.ADMIN_PASSWORD;
   if (
     !name ||
     name.length > 80 ||
     !email ||
-    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
-    typeof password !== "string" ||
-    password.length < 8 ||
-    password.length > 72
+    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
   ) {
-    throw new Error(
-      "Set ADMIN_NAME, a valid ADMIN_EMAIL, and ADMIN_PASSWORD (8–72 characters)",
-    );
+    throw new Error("Set ADMIN_NAME and a valid ADMIN_EMAIL");
   }
 
   await mongoose.connect(process.env.MONGO_URI);
-  const passwordHash = await bcrypt.hash(password, 12);
-  const user = await User.findOneAndUpdate(
-    { email },
-    {
-      $set: { name, password: passwordHash, role: "admin", isActive: true },
-    },
-    { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true },
-  );
+  const user = await User.findOne({ email }).select("+password");
+  if (!user) {
+    throw new Error("Register the account before promoting it");
+  }
+  if (!user.password) {
+    throw new Error("The account must have a password before promotion");
+  }
+  user.name = name;
+  user.role = "admin";
+  user.isActive = true;
+  await user.save();
   console.log(`Administrator provisioned (${user.id})`);
 }
 

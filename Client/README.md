@@ -12,7 +12,7 @@ Frontend only. Built against the actual `task_management_backend(1).zip` source 
 
 ## Authentication and permissions
 
-Registration validates name/email/password and returns a neutral response; sign in afterward. Normal login uses backend role: `/admin/dashboard` or `/dashboard`. Public registration cannot create admins; use an already authorized admin account provisioned by your trusted backend/database administrator. There is no admin self-registration or user-management mutation endpoint. Login returns a bearer JWT that the client stores in local storage and sends in the `Authorization` header; `/auth/me` restores the session after reload. Explicit 401 responses clear the local session; network and server errors do not. Backend authorization remains authoritative, and login/registration are rate-limited.
+Registration and login use email/password. The backend hashes new passwords with bcrypt; the browser's own Network tools can still display the password request, so use HTTPS in production. Public registration cannot create admins; register an account first, then use the backend provisioning utility to promote it. Login returns a bearer JWT that the client stores in local storage and sends in the `Authorization` header; `/auth/me` restores the session after reload. Explicit 401 responses clear the local session; network and server errors do not. Backend authorization remains authoritative, and authentication endpoints are rate-limited.
 
 ## Feature / API mapping
 
@@ -20,7 +20,7 @@ All endpoint paths below are prefixed by `/api`. The browser sends the bearer to
 
 | Screen | Actual backend contract |
 |---|---|
-| Register | POST /auth/register `{name,email,password}` -> neutral `{message}`; sign in afterward |
+| Register | POST /auth/register `{name,email,password}` -> neutral `{message}` |
 | Login | POST /auth/login `{email,password}` -> `{token,user}` |
 | Session | GET /auth/me -> `{user}` |
 | Admin & user dashboard | GET /dashboard -> `total,completed,pending,inProgress,overdue,byPriority,recentActivity,unreadNotifications` (server-scoped) |

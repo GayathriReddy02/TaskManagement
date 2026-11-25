@@ -228,6 +228,10 @@ export class Auth {
 export const authInterceptor: HttpInterceptorFn = (req, next) => {
   const auth = inject(Auth);
   const isApi = req.url.startsWith("/api/");
+  const isPublicAuth = [
+    "/api/auth/register",
+    "/api/auth/login",
+  ].includes(req.url);
   const token = isApi ? storedToken() : null;
   const outgoing =
     token && isApi
@@ -235,7 +239,12 @@ export const authInterceptor: HttpInterceptorFn = (req, next) => {
       : req;
   return next(outgoing).pipe(
     catchError((e) => {
-      if (isApi && e instanceof HttpErrorResponse && e.status === 401) {
+      if (
+        isApi &&
+        !isPublicAuth &&
+        e instanceof HttpErrorResponse &&
+        e.status === 401
+      ) {
         auth.sessionExpired();
       }
       return throwError(() => e);

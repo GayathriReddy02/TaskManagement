@@ -73,7 +73,7 @@ Commands:
 - Oversized JSON produces HTTP 413 and code `PAYLOAD_TOO_LARGE`.
 - Helmet security headers are enabled.
 - Credentialed CORS allows only the configured `CLIENT_ORIGIN` (defaults to `http://localhost:4200`); comma-separated exact origins are supported.
-- Login and registration are limited to 10 requests per IP address per 15 minutes.
+- Authentication endpoints are limited to 10 requests per IP address per 15 minutes.
 - Protected routes accept the existing JWT bearer-token contract using `Authorization: Bearer <token>`; cookies and CSRF tokens are not required.
 
 ### Health endpoint
@@ -116,55 +116,18 @@ Existing controller validation responses may return only `message`; centralized 
 
 - `name`: Required string, trimmed, maximum 80 characters.
 - `email`: Required unique string, trimmed and lowercased.
-- `password`: Required string; excluded from normal query results.
+- `password`: Required string hash; excluded from normal query results. Passwords are stored as bcrypt hashes at cost 12.
 - `role`: `user` or `admin`; default `user`.
 - `isActive`: Boolean; default `true`.
 - Mongoose timestamps: `createdAt`, `updatedAt`.
 
-### Public registration
+### Registration and password login
 
-`POST /api/auth/register`
+`POST /api/auth/register` accepts `name`, `email`, and `password`. Names must be non-empty and at most 80 characters; emails must match a basic email pattern; passwords must contain at least 8 characters and no more than 72 UTF-8 bytes. Passwords are hashed with bcrypt cost 12. Registration always creates a regular user and returns the same neutral HTTP 202 response for new and existing accounts. Public input cannot set role or account state.
 
-Request:
+`POST /api/auth/login` accepts `email` and `password`. The user must exist and be active; invalid credentials receive a generic HTTP 401 response. The backend compares the supplied password with the stored bcrypt hash. The browser's owner can inspect the password request in DevTools; HTTPS protects it in transit, while bcrypt protects the stored database value.
 
-```json
-{
-  "name": "Alex",
-  "email": "alex@example.com",
-  "password": "Password123"
-}
-```
-
-Rules:
-
-- Name must be a non-empty string of at most 80 characters.
-- Email must match a basic email pattern.
-- Password must contain 8–72 characters.
-- Password is hashed with bcrypt cost 12.
-- Public registration always creates a `user`.
-- `role`, `isActive`, and timestamps cannot be supplied publicly.
-- Valid requests return the same neutral HTTP 202 response for new and existing accounts. Registration does not create an authenticated session; the user must log in afterward.
-
-### Login
-
-`POST /api/auth/login`
-
-Request:
-
-```json
-{
-  "email": "alex@example.com",
-  "password": "Password123"
-}
-```
-
-Rules:
-
-- User must exist and be active.
-- Password must match the stored bcrypt hash.
-- Invalid credentials return HTTP 401.
-- JWT contains the subject `sub = user.id`, uses HS256, and expires according to `JWT_EXPIRES_IN`. The login response returns `{ "token", "user" }`; clients send the token as a bearer token.
-- `POST /api/auth/logout` returns 204. The client clears its locally stored token; the stateless JWT remains valid until expiry if copied elsewhere.
+JWT contains `sub = user.id`, uses HS256, and expires according to `JWT_EXPIRES_IN`. `POST /api/auth/logout` returns 204. The client clears its locally stored token; the stateless JWT remains valid until expiry if copied elsewhere.
 
 ### Authentication middleware
 
@@ -204,7 +167,7 @@ Public registration cannot create an admin. Admin accounts must be provisioned t
 
 Admin-only endpoint that returns active users sorted by name. Task owners/admins use `GET /api/tasks/:id/assignees` for an authorized, task-scoped assignment lookup.
 
-The general directory exposes names and IDs to admins only. Task-scoped assignee lookup is owner/admin-only and also includes email addresses for choosing an assignee. Password hashes are never returned.
+The general directory exposes names and IDs to admins only. Task-scoped assignee lookup is owner/admin-only and also includes email addresses for choosing an assignee. Authentication credentials are never returned.
 
 ## 9. Task Model
 
@@ -361,7 +324,7 @@ Request:
 `DELETE /api/tasks/:id`
 
 - Owner or admin only.
-- Deletes notifications linked to the task for all recipients in the same transaction.
+- Deletes notifications linked to the task for all recipients after deleting the task; these writes are not atomic.
 - Retains activity history.
 - Returns `{ "message": "Task deleted" }`.
 
@@ -465,7 +428,7 @@ Overdue means:
 
 ## 14. Event and Queue Architecture
 
-Task controllers persist activity and notification jobs in MongoDB in the same transaction as each successful task write.
+Task controllers persist activity and notification jobs in MongoDB after each successful task write. These separate writes are not atomic; an enqueue failure does not roll back the task mutation.
 
 Events:
 
@@ -671,7 +634,7 @@ API tests cover:
 - Authentication rejection for task, job, and report APIs.
 - Malformed JSON handling.
 
-`tests/jobRetention.test.js` also contains a MongoDB-backed queue/outbox transaction test. It runs only when `MONGO_TEST_URI` points to a local `rs0` replica-set database named `task_management_it_<12 hex characters>`; it drops only that named test database when finished. Without that variable, the test is skipped.
+`tests/jobRetention.test.js` also contains a MongoDB-backed standalone queue/outbox test. It runs only when `MONGO_TEST_URI` points to a local standalone database named `task_management_it_<12 hex characters>`; it drops only that named test database when finished. Without that variable, the test is skipped.
 
 Testing rule: never point test database operations at production.
 
@@ -694,7 +657,7 @@ Demonstrates lost `this`, `bind`, arrow-wrapper, `call`, and `apply` behavior.
 
 The current implementation is intentionally a learning baseline:
 
-- MongoDB must be configured as a replica set or transaction-capable sharded cluster.
+- MongoDB may run standalone. Task mutations and related job/notification writes are not atomic, and job capacity checks are serialized only within one backend process.
 - Export requests are limited to five per user per rolling hour, and generated files are deleted after 24 hours.
 - Download access is not revoked when task permissions change after report creation.
 - CORS is restricted to `CLIENT_ORIGIN`; authentication rate limits and Helmet headers are enabled.

@@ -5,32 +5,21 @@ class NotificationService {
     this.model = model;
     this.taskModel = taskModel;
   }
-  async notify(userId, taskId, type, message, dedupeKey, session) {
+  async notify(userId, taskId, type, message, dedupeKey) {
     if (!userId) return;
-    const create = async (activeSession) => {
-      if (taskId) {
-        const result = await this.taskModel.updateOne(
-          { _id: taskId },
-          { $inc: { notificationVersion: 1 } },
-          { session: activeSession, timestamps: false },
-        );
-        if (!result.matchedCount) return;
-      }
-      const existing = await this.model
-        .findOne({ userId, dedupeKey })
-        .session(activeSession)
-        .select("_id")
-        .lean();
-      if (existing) return;
-      await this.model.create(
-        [{ userId, taskId, type, message, dedupeKey }],
-        { session: activeSession },
+    if (taskId && !(await this.taskModel.exists({ _id: taskId }))) return;
+    try {
+      await this.model.updateOne(
+        { userId, dedupeKey },
+        { $setOnInsert: { userId, taskId, type, message, dedupeKey } },
+        { upsert: true },
       );
-    };
-    if (session) return create(session);
-    return this.model.db.transaction(create);
+    } catch (error) {
+      if (error.code === 11000) return;
+      throw error;
+    }
   }
-  async handle(event, { taskId, title, priority, creatorId, assigneeId, actorId, eventId, details }, session) {
+  async handle(event, { taskId, title, priority, creatorId, assigneeId, actorId, eventId, details }) {
     if (event === "taskAssigned") {
       if (assigneeId && String(assigneeId) !== String(actorId)) {
         await this.notify(
@@ -39,7 +28,6 @@ class NotificationService {
           "assignment",
           `Task assigned: ${title}`,
           `assignment:${eventId}`,
-          session,
         );
       }
     }
@@ -52,7 +40,6 @@ class NotificationService {
           "completion",
           `Task completed: ${title}`,
           `completion:${eventId}`,
-          session,
         );
       }
     }
@@ -67,7 +54,6 @@ class NotificationService {
             "priorityChanged",
             `Priority changed to ${priority}: ${title}`,
             `priority:${eventId}`,
-            session,
           );
         }
       }

@@ -128,7 +128,7 @@ function validateListParams(params) {
   return null;
 }
 
-function buildTaskMatch(user, params) {
+function buildTaskMatch(user, params = {}) {
   const match = {};
   const conditions = [];
   if (user.role !== "admin") {
@@ -215,7 +215,7 @@ async function listTasks(user, params) {
   };
 }
 
-async function assignTask(task, userId, beforeChange = () => {}, session) {
+async function assignTask(task, userId, beforeChange = () => {}) {
   if (userId !== null && !validId(userId))
     return { error: "Invalid user ID", code: 400 };
   let assignee = null;
@@ -228,16 +228,15 @@ async function assignTask(task, userId, beforeChange = () => {}, session) {
   if (String(task.assignedTo || "") !== String(nextAssigneeId || ""))
     beforeChange();
   task.assignedTo = nextAssigneeId;
-  await task.save(session ? { session } : undefined);
+  await task.save();
   return { task };
 }
 class TaskService {
   constructor(model = Task) {
     this.model = model;
   }
-  async create(data, session) {
-    const result = await this.model.create(session ? [data] : data, session ? { session } : undefined);
-    return Array.isArray(result) ? result[0] : result;
+  create(data) {
+    return this.model.create(data);
   }
   findById(id) {
     return this.model.findById(id);
@@ -245,25 +244,24 @@ class TaskService {
   list(user, params) {
     return listTasks(user, params);
   }
-  assign(task, userId, beforeChange, session) {
-    return assignTask(task, userId, beforeChange, session);
+  assign(task, userId, beforeChange) {
+    return assignTask(task, userId, beforeChange);
   }
-  save(task, session) {
-    return task.save(session ? { session } : undefined);
+  save(task) {
+    return task.save();
   }
-  updateIfUnchanged(id, updatedAt, changes, session) {
+  updateIfUnchanged(id, updatedAt, changes) {
     return this.model.findOneAndUpdate(
       { _id: id, updatedAt },
       { $set: changes },
       {
         new: true,
         runValidators: true,
-        ...(session ? { session } : {}),
       },
     );
   }
-  remove(task, session) {
-    return task.deleteOne(session ? { session } : undefined);
+  remove(task) {
+    return task.deleteOne();
   }
 }
 const taskService = new TaskService();

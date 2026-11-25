@@ -5,8 +5,8 @@ The API is served by the Express backend. Prefix endpoints with `http://localhos
 ## Conventions
 
 - JSON request and response bodies unless noted.
-- Protected routes require `Authorization: Bearer <token>`. Login continues to issue JWT bearer tokens; state-changing requests do not require CSRF tokens.
-- Registration and login are public.
+- Protected routes require `Authorization: Bearer <token>`. Successful email/password authentication issues a JWT bearer token; state-changing requests do not require CSRF tokens.
+- Registration and email/password login are public.
 - Public registration always assigns the `user` role.
 - Task visibility is owned or assigned for regular users; admins can view all tasks.
 - Error response from centralized middleware:
@@ -56,9 +56,9 @@ Authentication is implemented by `protect` middleware in `src/middleware/auth.js
 
 ## Authentication examples
 
-### Register and login
+### Register and login with email/password
 
-Registration always returns the same neutral response for valid details, whether or not an account already exists; it does not sign in the user. Sign in afterward.
+Registration returns a neutral response for new and existing accounts. Passwords are hashed with bcrypt on the server; clients should send them over HTTPS and must not hash them in the browser as a substitute for TLS.
 
 ```http
 POST /api/auth/register
@@ -73,19 +73,23 @@ Content-Type: application/json
 }
 ```
 
-Response (202), regardless of whether an account was created:
+Valid registration responds with HTTP 202 and a neutral message. Passwords must contain at least 8 characters and no more than 72 UTF-8 bytes; names are limited to 80 characters. Public input cannot set role or account state.
+
+```http
+POST /api/auth/login
+Content-Type: application/json
+```
 
 ```json
 {
-  "message": "If the account can be created, you may now sign in."
+  "email": "alex@example.com",
+  "password": "replace-with-a-private-password"
 }
 ```
 
-Passwords must contain 8–72 characters. Names are required and limited to 80 characters. Public input cannot set role or account state.
+Login returns `{ "token", "user" }`. Send the token as `Authorization: Bearer <token>` on protected requests. The Angular client stores it in local storage and sends it automatically. `/api/auth/logout` returns 204; the client removes the locally stored token.
 
-### Login and current user
-
-`POST /api/auth/login` accepts `email` and `password`, and returns `{ "token", "user" }`. Send the token as `Authorization: Bearer <token>` on protected requests. The Angular client stores the token in local storage and sends it automatically. `/api/auth/logout` returns 204; the client removes the locally stored token.
+The browser owner can inspect the password in DevTools Network. That is expected for password-based authentication; HTTPS protects it in transit, while bcrypt protects the stored database value.
 
 ```http
 Authorization: Bearer <JWT>
